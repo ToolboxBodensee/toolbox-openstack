@@ -1,0 +1,14 @@
+#!/bin/sh
+
+set -e
+
+. /usr/share/debconf/confmodule
+CONF=/etc/openstack-cluster-installer/openstack-cluster-installer.conf
+
+#PKGOS-INCLUDE#
+
+pkgos_var_user_group oci
+pkgos_dbc_read_conf -pkg openstack-cluster-installer ${CONF} database connection openstack-cluster-installer $@
+db_go
+
+exit 0

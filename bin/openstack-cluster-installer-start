@@ -1,0 +1,32 @@
+#!/bin/sh
+
+set -e
+set -x
+
+if ! [ -r /etc/openstack-cluster-installer/openstack-cluster-installer.conf ] ; then
+	echo "Could not load /etc/openstack-cluster-installer/openstack-cluster-installer.conf"
+	exit 1
+fi
+
+TMPFILE=$(mktemp -t openstack-cluster-installer.XXXXXX)
+cat /etc/openstack-cluster-installer/openstack-cluster-installer.conf | grep -v '^\[' >${TMPFILE}
+. ${TMPFILE}
+rm ${TMPFILE}
+
+qemu-img create /var/lib/openstack-cluster-installer/openstack-cluster-installer-scratch-disk.dat 10G
+
+/usr/bin/kvm \
+	-m size=6G \
+	-smp cpus=8 \
+	-cpu host \
+	-display sdl \
+	-pidfile /var/lib/openstack-cluster-installer/vm.pid \
+	-daemonize \
+	-name openstack-install-vm \
+	-drive if=virtio,file=/var/lib/openstack-cluster-installer/openstack-cluster-installer-scratch-disk.dat,index=0,media=disk,format=raw \
+	-boot n \
+	-option-rom /usr/lib/ipxe/qemu/pxe-e1000.rom \
+        -device e1000,netdev=net0,mac=${QEMU_VM_MAC} \
+        -netdev tap,id=net0,ifname=${PXE_VM_VIRTAP_NAME},script=no,downscript=no \
+        -device e1000,netdev=net1,mac=08:00:27:06:CC:DE \
+        -netdev user,id=net1,net=172.17.1.0/24,dhcpstart=172.17.1.1

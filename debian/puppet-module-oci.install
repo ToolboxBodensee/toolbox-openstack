@@ -1,0 +1,2 @@
+puppet/files		/usr/share/puppet/modules.available/oci
+puppet/manifests	/usr/share/puppet/modules.available/oci

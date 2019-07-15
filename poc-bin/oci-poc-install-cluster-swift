@@ -1,0 +1,95 @@
+#!/bin/sh
+
+set -e
+set -x
+
+if ! [ -r /etc/oci-poc/oci-poc.conf ] ; then
+	echo "Cannot read /etc/oci-poc/oci-poc.conf"
+fi
+. /etc/oci-poc/oci-poc.conf
+
+# Check that we really have NUMBER_OF_GUESTS machines available
+# before starting anything
+check_enough_vms_available () {
+	EXPECTED_NUM_OF_SLAVES=${1}
+
+	NUM_VM=$(ocicli -csv machine-list | q -d , -H "SELECT COUNT(*) AS count FROM -")
+	if [ ${NUM_VM} -lt ${EXPECTED_NUM_OF_SLAVES} ] ; then
+		echo "Num of VM too low... exiting"
+	fi
+}
+
+
+check_enough_vms_available $((${NUMBER_OF_GUESTS} - 1))
+
+ocicli machine-set-ipmi C1 yes 192.168.100.1 9002 ipmiusr test
+ocicli machine-set-ipmi C2 yes 192.168.100.1 9003 ipmiusr test
+ocicli machine-set-ipmi C3 yes 192.168.100.1 9004 ipmiusr test
+ocicli machine-set-ipmi C4 yes 192.168.100.1 9005 ipmiusr test
+ocicli machine-set-ipmi C5 yes 192.168.100.1 9006 ipmiusr test
+ocicli machine-set-ipmi C6 yes 192.168.100.1 9007 ipmiusr test
+ocicli machine-set-ipmi C7 yes 192.168.100.1 9008 ipmiusr test
+ocicli machine-set-ipmi C8 yes 192.168.100.1 9009 ipmiusr test
+ocicli machine-set-ipmi C9 yes 192.168.100.1 9010 ipmiusr test
+ocicli machine-set-ipmi CA yes 192.168.100.1 9011 ipmiusr test
+ocicli machine-set-ipmi CB yes 192.168.100.1 9012 ipmiusr test
+ocicli machine-set-ipmi CC yes 192.168.100.1 9013 ipmiusr test
+ocicli machine-set-ipmi CD yes 192.168.100.1 9014 ipmiusr test
+ocicli machine-set-ipmi CE yes 192.168.100.1 9015 ipmiusr test
+ocicli machine-set-ipmi CF yes 192.168.100.1 9016 ipmiusr test
+ocicli machine-set-ipmi D0 yes 192.168.100.1 9017 ipmiusr test
+ocicli machine-set-ipmi D1 yes 192.168.100.1 9018 ipmiusr test
+ocicli machine-set-ipmi D2 yes 192.168.100.1 9019 ipmiusr test
+
+ocicli swift-region-create bdb
+ocicli swift-region-create ver
+ocicli swift-region-create pub
+
+ocicli location-create ver-zone-1 ver
+ocicli location-create ver-zone-2 ver
+ocicli location-create bdb-zone-1 bdb
+ocicli location-create bdb-zone-2 bdb
+ocicli location-create bdb-zone-3 bdb
+ocicli location-create public pub
+
+ocicli network-create ver-swift01-net01 192.168.101.0 24 ver-zone-1 no
+ocicli network-create ver-swift01-net02 192.168.102.0 24 ver-zone-2 no
+ocicli network-create bdb-swift01-net01 192.168.103.0 24 bdb-zone-1 no
+ocicli network-create bdb-swift01-net02 192.168.104.0 24 bdb-zone-2 no
+ocicli network-create bdb-swift01-net03 192.168.105.0 24 bdb-zone-3 no
+ocicli network-create public 192.168.106.0 24 public yes
+
+ocicli cluster-create swift01 infomaniak.ch
+
+ocicli network-add ver-swift01-net01 swift01 all eth1 none
+ocicli network-add ver-swift01-net02 swift01 all eth2 none
+ocicli network-add bdb-swift01-net01 swift01 all eth1 none
+ocicli network-add bdb-swift01-net02 swift01 all eth3 none
+ocicli network-add bdb-swift01-net03 swift01 all eth0 none
+ocicli network-add public swift01 all eth0 none
+
+ocicli machine-add C1 swift01 controller ver-zone-1
+ocicli machine-add C2 swift01 controller bdb-zone-1
+ocicli machine-add C3 swift01 controller bdb-zone-2
+
+ocicli machine-add C4 swift01 swiftproxy ver-zone-1
+ocicli machine-add C5 swift01 swiftproxy bdb-zone-1
+ocicli machine-add C6 swift01 swiftproxy bdb-zone-2
+
+# Store, replica 1
+ocicli machine-add C7 swift01 swiftstore ver-zone-1
+ocicli machine-add C8 swift01 swiftstore ver-zone-2
+ocicli machine-add C9 swift01 swiftstore bdb-zone-1
+ocicli machine-add CA swift01 swiftstore bdb-zone-2
+ocicli machine-add CB swift01 swiftstore bdb-zone-3
+
+# Store, replica 2
+ocicli machine-add CC swift01 swiftstore ver-zone-1
+ocicli machine-add CD swift01 swiftstore ver-zone-2
+ocicli machine-add CE swift01 swiftstore bdb-zone-1
+ocicli machine-add CF swift01 swiftstore bdb-zone-2
+ocicli machine-add D0 swift01 swiftstore bdb-zone-3
+
+#ocicli swift-calculate-ring swift01
+
+exit 0

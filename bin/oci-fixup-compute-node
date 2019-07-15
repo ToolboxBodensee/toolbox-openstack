@@ -1,0 +1,23 @@
+#!/bin/sh
+
+set -e
+set -x
+
+systemctl restart virtlogd
+sleep 2
+systemctl restart libvirtd
+sleep 2
+
+if [ -e /etc/ceph/ceph.client.openstack.keyring ] ; then
+	LIBVIRT_SECRET=$(cat /etc/ceph/ceph.client.openstack.keyring | grep key | awk '{print $3}')
+	LIBVIRT_UUID=$(xpath -e "//secret/uuid/text()" /etc/nova/secret.xml 2> /dev/null)
+
+	TMP_FILE=$(mktemp)
+	virsh secret-list >${TMP_FILE}
+	if ! grep -q ${LIBVIRT_UUID} ${TMP_FILE} ; then
+		virsh secret-define --file /etc/nova/secret.xml
+		virsh secret-set-value --secret ${LIBVIRT_UUID} ${LIBVIRT_SECRET}
+	fi
+fi
+
+systemctl restart nova-compute

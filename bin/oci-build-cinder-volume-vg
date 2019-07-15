@@ -1,0 +1,38 @@
+#!/bin/sh
+
+set -e
+set -x
+
+usage () {
+	echo "Usage: $0 /dev/<DEVICE>"
+	echo "Example: $0 /dev/sdb"
+	exit 1
+}
+
+if [ -z "${1}" ] ; then
+	usage
+fi
+
+VG_DEVICE_NAME=${1}
+
+if ! [ -e ${VG_DEVICE_NAME} ] ; then
+	echo "Device ${VG_DEVICE_NAME} does not exist"
+	exit 1
+fi
+
+# This is the "9" in cloud1-volume-9 ...
+COMP_NN=$(hostname | cut -d. -f1 | cut -d- -f3)
+# This is the "cloud1" in cloud1-volume-9 ...
+CLUST=$(hostname | cut -d. -f1 | cut -d- -f1)
+
+VG_NAME=${CLUST}vol${COMP_NN}vg0
+
+# Make the PV if it's possible
+if pvcreate -t ${VG_DEVICE_NAME} ; then
+	pvcreate ${VG_DEVICE_NAME}
+fi
+# Make VG
+if ! [ -d /dev/${VG_NAME} ] ; then
+	vgcreate ${VG_NAME} ${VG_DEVICE_NAME}
+	vgchange -a y ${VG_NAME}
+fi

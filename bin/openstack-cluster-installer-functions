@@ -1,0 +1,18 @@
+#!/bin/sh
+
+# Params: $1 = CIDR      192.168.101.0/24
+# Returms: DOSCI_NETWORK 192.168.101.0
+#          DOSCI_NETMASK 255.255.255.0
+#          DOSCI_HOSTMIN 192.168.101.1
+#          DOSCI_HOSTMAX 192.168.101.254
+#          DOSCI_BROADCA 192.168.101.255
+os_cluster_installer_calc_cluster_ips () {
+	local OSCICCI_CIDR
+	OSCICCI_CIDR=${1}
+
+	DOSCI_NETWORK=$(ipcalc ${OSCICCI_CIDR} | grep Address:   | awk '{print $2}')
+	DOSCI_NETMASK=$(ipcalc ${OSCICCI_CIDR} | grep Netmask:   | awk '{print $2}')
+	DOSCI_HOSTMIN=$(ipcalc ${OSCICCI_CIDR} | grep HostMin:   | awk '{print $2}')
+	DOSCI_HOSTMAX=$(ipcalc ${OSCICCI_CIDR} | grep HostMax:   | awk '{print $2}')
+	DOSCI_BROADCA=$(ipcalc ${OSCICCI_CIDR} | grep Broadcast: | awk '{print $2}')
+}

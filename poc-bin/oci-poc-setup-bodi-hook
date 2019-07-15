@@ -1,0 +1,155 @@
+#!/bin/sh
+
+set -e
+set -x
+
+if ! [ -r /etc/oci-poc/oci-poc.conf ] ; then
+	echo "Could not read /etc/oci-poc/oci-poc.conf"
+	exit 1
+fi
+. /etc/oci-poc/oci-poc.conf
+
+### SETUP REPOSITORIES ###
+if [ "${use_debian_dot_net_backport}" = "yes" ] ; then
+	echo "deb ${DEBIAN_DOT_NET_REPO} ${debian_release}-${openstack_release}-backports main
+deb-src ${DEBIAN_DOT_NET_REPO} ${debian_release}-${openstack_release}-backports main
+
+deb ${DEBIAN_DOT_NET_REPO} ${debian_release}-${openstack_release}-backports-nochange main
+deb-src ${DEBIAN_DOT_NET_REPO} ${debian_release}-${openstack_release}-backports-nochange main
+" >${BODI_CHROOT_PATH}/etc/apt/sources.list.d/openstack.list
+
+	wget http://${debian_release}-${openstack_release}.debian.net/debian/pool/${debian_release}-${openstack_release}-backports/main/o/openstack-backports-archive-keyring/openstack-backports-archive-keyring_0.1_all.deb \
+		-O ${BODI_CHROOT_PATH}/openstack-backports-archive-keyring_0.1_all.deb
+	chroot ${BODI_CHROOT_PATH} dpkg -i /openstack-backports-archive-keyring_0.1_all.deb
+	rm -f /openstack-backports-archive-keyring_0.1_all.deb
+	chroot ${BODI_CHROOT_PATH} apt-get update
+	chroot ${BODI_CHROOT_PATH} apt-get -y dist-upgrade -o Dpkg::Options::="--force-confnew"
+fi
+
+if [ "${install_buildd_incoming}" = "yes" ] ; then
+	echo "deb ${DEBIAN_INCOMING_BUILDD} buildd-sid main
+deb-src ${DEBIAN_INCOMING_BUILDD} buildd-sid main
+" >${BODI_CHROOT_PATH}/etc/apt/sources.list.d/buildd-incoming.list
+	chroot ${BODI_CHROOT_PATH} apt-get update
+	chroot ${BODI_CHROOT_PATH} apt-get -y dist-upgrade -o Dpkg::Options::="--force-confnew"
+fi
+
+### INSTALL openstack-cluster-installer ###
+DEBIAN_FRONTEND=noninteractive chroot ${BODI_CHROOT_PATH} apt-get install -y -o Dpkg::Options::="--force-confnew" openstack-cluster-installer haveged
+
+# configure it with the settings from oci-poc
+sed -i "s#^OPENSTACK_CLUSTER_NETWORK=.*#OPENSTACK_CLUSTER_NETWORK=${HOST_BRIDGE_NET}#" ${BODI_CHROOT_PATH}/etc/openstack-cluster-installer/openstack-cluster-installer.conf
+sed -i "s#^debian_mirror=.*#debian_mirror=${DEBIAN_MIRROR}#" ${BODI_CHROOT_PATH}/etc/openstack-cluster-installer/openstack-cluster-installer.conf
+sed -i "s#^debian_security_mirror=.*#debian_security_mirror=${DEBIAN_SECURITY_MIRROR}#" ${BODI_CHROOT_PATH}/etc/openstack-cluster-installer/openstack-cluster-installer.conf
+sed -i "s#^OCI_IP=.*#OCI_IP=${OCI_VM_IP}#" ${BODI_CHROOT_PATH}/etc/openstack-cluster-installer/openstack-cluster-installer.conf
+# Forward settings of PoC inside OCI
+sed -i "s#^openstack_release=.*#openstack_release=${openstack_release}#" ${BODI_CHROOT_PATH}/etc/openstack-cluster-installer/openstack-cluster-installer.conf
+sed -i "s#^use_debian_dot_net_backport=.*#use_debian_dot_net_backport=${use_debian_dot_net_backport}#" ${BODI_CHROOT_PATH}/etc/openstack-cluster-installer/openstack-cluster-installer.conf
+sed -i "s#^debian_release=.*#debian_release=${debian_release}#" ${BODI_CHROOT_PATH}/etc/openstack-cluster-installer/openstack-cluster-installer.conf
+sed -i "s#^install_buildd_incoming=.*#install_buildd_incoming=${install_buildd_incoming}#" ${BODI_CHROOT_PATH}/etc/openstack-cluster-installer/openstack-cluster-installer.conf
+# Fix the Ceph mirror stuff
+sed -i "s#^debian_mirror_ceph=.*#debian_mirror_ceph=${DEBIAN_MIRROR_CEPH}#" ${BODI_CHROOT_PATH}/etc/openstack-cluster-installer/openstack-cluster-installer.conf
+sed -i "s#^install_ceph_upstream_repo=.*#install_ceph_upstream_repo=${use_upstream_ceph_mirror}#" ${BODI_CHROOT_PATH}/etc/openstack-cluster-installer/openstack-cluster-installer.conf
+# Fix Megacli and Racadm preferences
+sed -i  "s#^target_install_dell_ipmi=.*#target_install_dell_ipmi=${target_install_dell_ipmi}#" ${BODI_CHROOT_PATH}/etc/openstack-cluster-installer/openstack-cluster-installer.conf
+sed -i  "s#^live_image_install_dell_ipmi=.*#live_image_install_dell_ipmi=${live_image_install_dell_ipmi}#" ${BODI_CHROOT_PATH}/etc/openstack-cluster-installer/openstack-cluster-installer.conf
+sed -i  "s#^dell_ipmi_repo=.*#dell_ipmi_repo=${dell_ipmi_repo}#" ${BODI_CHROOT_PATH}/etc/openstack-cluster-installer/openstack-cluster-installer.conf
+sed -i  "s#^target_install_megacli=.*#target_install_megacli=${target_install_megacli}#" ${BODI_CHROOT_PATH}/etc/openstack-cluster-installer/openstack-cluster-installer.conf
+sed -i  "s#^live_image_install_megacli=.*#live_image_install_megacli=${live_image_install_megacli}#" ${BODI_CHROOT_PATH}/etc/openstack-cluster-installer/openstack-cluster-installer.conf
+sed -i  "s#^megacli_repo=.*#megacli_repo=${megacli_repo}#" ${BODI_CHROOT_PATH}/etc/openstack-cluster-installer/openstack-cluster-installer.conf
+
+if [ "${use_upstream_ceph_mirror}" = "yes" ] ; then
+	echo "-----BEGIN PGP PUBLIC KEY BLOCK-----
+Version: GnuPG v1
+
+mQINBFX4hgkBEADLqn6O+UFp+ZuwccNldwvh5PzEwKUPlXKPLjQfXlQRig1flpCH
+E0HJ5wgGlCtYd3Ol9f9+qU24kDNzfbs5bud58BeE7zFaZ4s0JMOMuVm7p8JhsvkU
+C/Lo/7NFh25e4kgJpjvnwua7c2YrA44ggRb1QT19ueOZLK5wCQ1mR+0GdrcHRCLr
+7Sdw1d7aLxMT+5nvqfzsmbDullsWOD6RnMdcqhOxZZvpay8OeuK+yb8FVQ4sOIzB
+FiNi5cNOFFHg+8dZQoDrK3BpwNxYdGHsYIwU9u6DWWqXybBnB9jd2pve9PlzQUbO
+eHEa4Z+jPqxY829f4ldaql7ig8e6BaInTfs2wPnHJ+606g2UH86QUmrVAjVzlLCm
+nqoGymoAPGA4ObHu9X3kO8viMBId9FzooVqR8a9En7ZE0Dm9O7puzXR7A1f5sHoz
+JdYHnr32I+B8iOixhDUtxIY4GA8biGATNaPd8XR2Ca1hPuZRVuIiGG9HDqUEtXhV
+fY5qjTjaThIVKtYgEkWMT+Wet3DPPiWT3ftNOE907e6EWEBCHgsEuuZnAbku1GgD
+LBH4/a/yo9bNvGZKRaTUM/1TXhM5XgVKjd07B4cChgKypAVHvef3HKfCG2U/DkyA
+LjteHt/V807MtSlQyYaXUTGtDCrQPSlMK5TjmqUnDwy6Qdq8dtWN3DtBWQARAQAB
+tCpDZXBoLmNvbSAocmVsZWFzZSBrZXkpIDxzZWN1cml0eUBjZXBoLmNvbT6JAjgE
+EwECACIFAlX4hgkCGwMGCwkIBwMCBhUIAgkKCwQWAgMBAh4BAheAAAoJEOhKwsBG
+DzmUXdIQAI8YPcZMBWdv489q8CzxlfRIRZ3Gv/G/8CH+EOExcmkVZ89mVHngCdAP
+DOYCl8twWXC1lwJuLDBtkUOHXNuR5+Jcl5zFOUyldq1Hv8u03vjnGT7lLJkJoqpG
+l9QD8nBqRvBU7EM+CU7kP8+09b+088pULil+8x46PwgXkvOQwfVKSOr740Q4J4nm
+/nUOyTNtToYntmt2fAVWDTIuyPpAqA6jcqSOC7Xoz9cYxkVWnYMLBUySXmSS0uxl
+3p+wK0lMG0my/gb+alke5PAQjcE5dtXYzCn+8Lj0uSfCk8Gy0ZOK2oiUjaCGYN6D
+u72qDRFBnR3jaoFqi03bGBIMnglGuAPyBZiI7LJgzuT9xumjKTJW3kN4YJxMNYu1
+FzmIyFZpyvZ7930vB2UpCOiIaRdZiX4Z6ZN2frD3a/vBxBNqiNh/BO+Dex+PDfI4
+TqwF8zlcjt4XZ2teQ8nNMR/D8oiYTUW8hwR4laEmDy7ASxe0p5aijmUApWq5UTsF
++s/QbwugccU0iR5orksM5u9MZH4J/mFGKzOltfGXNLYI6D5Mtwrnyi0BsF5eY0u6
+vkdivtdqrq2DXY+ftuqLOQ7b+t1RctbcMHGPptlxFuN9ufP5TiTWSpfqDwmHCLsT
+k2vFiMwcHdLpQ1IH8ORVRgPPsiBnBOJ/kIiXG2SxPUTjjEGOVgeA
+=/Tod
+-----END PGP PUBLIC KEY BLOCK-----
+" >${BODI_CHROOT_PATH}/root/ceph-repo.asc
+	chroot ${BODI_CHROOT_PATH} apt-key add /root/ceph-repo.asc
+	rm ${BODI_CHROOT_PATH}/root/ceph-repo.asc
+	echo "deb ${DEBIAN_MIRROR_CEPH} ${debian_release} main
+deb-src ${DEBIAN_MIRROR_CEPH} ${debian_release} main
+" >${BODI_CHROOT_PATH}/etc/apt/sources.list.d/ceph.list
+        chroot ${BODI_CHROOT_PATH} apt-get update
+fi
+
+cp /etc/oci-poc/motd ${BODI_CHROOT_PATH}/etc/openstack-cluster-installer/motd
+
+### CONFIGURE isc-dhcpd ###
+sed -i 's/INTERFACESv4=.*/INTERFACESv4="eth0"/' ${BODI_CHROOT_PATH}/etc/default/isc-dhcp-server
+
+echo "allow booting;
+allow bootp;
+default-lease-time 600;
+max-lease-time 7200;
+ddns-update-style none;
+authoritative;
+ignore-client-uids On;
+
+subnet ${HOST_NETWORK_PREFIX}.0 netmask 255.255.255.0 {
+	range ${GUEST_FIRST_SLAVE_IP} ${GUEST_LAST_SLAVE_IP};
+	option domain-name \"${GUESTS_DOMAIN_NAME}\";
+	option domain-name-servers ${PRIMARY_DNS}, ${SECONDA_DNS};
+	option routers ${HOST_NETWORK_PREFIX}.1;
+	option subnet-mask 255.255.255.0;
+	option broadcast-address ${HOST_NETWORK_PREFIX}.255;
+	next-server ${OCI_VM_IP};
+	if exists user-class and option user-class = \"iPXE\" {
+		filename \"http://${OCI_VM_IP}/oci/ipxe.php\";
+	} else {
+		filename \"pxelinux.0\";
+	}
+}
+" >${BODI_CHROOT_PATH}/etc/dhcp/dhcpd.conf
+
+### CONFIGURE tftpd ###
+sed -i 's#TFTP_DIRECTORY=.*#TFTP_DIRECTORY="/var/lib/openstack-cluster-installer/tftp"#' ${BODI_CHROOT_PATH}/etc/default/tftpd-hpa
+
+# Copy our authorized_keys in the image BEFORE we build the live image
+# so that it will be there
+if [ -e /root/.ssh/authorized_keys ] ; then
+	mkdir -p ${BODI_CHROOT_PATH}/root/.ssh
+	chmod 700 ${BODI_CHROOT_PATH}/root/.ssh
+	cat /root/.ssh/authorized_keys >>${BODI_CHROOT_PATH}/root/.ssh/authorized_keys
+fi
+
+### Build OCI's live image ###
+mkdir -p ${BODI_CHROOT_PATH}/root/live-image
+chroot ${BODI_CHROOT_PATH} /bin/bash <<EOF
+cd /root/live-image
+openstack-cluster-installer-build-live-image --pxe-server-ip ${OCI_VM_IP} --debian-mirror-addr ${DEBIAN_MIRROR} --debian-security-mirror-addr ${DEBIAN_SECURITY_MIRROR}
+EOF
+# We remove the workdir, because it's too heavy to copy
+rm -rf ${BODI_CHROOT_PATH}/root/live-image
+
+# Configure puppet's ENC
+. /usr/share/openstack-pkg-tools/pkgos_func
+
+pkgos_add_directive ${BODI_CHROOT_PATH}/etc/puppet/puppet.conf master "external_nodes = /usr/bin/oci-puppet-external-node-classifier" "# Path to enc"
+pkgos_inifile set ${BODI_CHROOT_PATH}/etc/puppet/puppet.conf master external_nodes /usr/bin/oci-puppet-external-node-classifier
+pkgos_add_directive ${BODI_CHROOT_PATH}/etc/puppet/puppet.conf master "node_terminus = exec" "# Tell what type of ENC"
+pkgos_inifile set ${BODI_CHROOT_PATH}/etc/puppet/puppet.conf master node_terminus exec

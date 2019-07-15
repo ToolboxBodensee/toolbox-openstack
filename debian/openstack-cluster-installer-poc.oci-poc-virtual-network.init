@@ -1,0 +1,205 @@
+#!/bin/sh
+
+### BEGIN INIT INFO
+# Provides:          oci-poc-virtual-network
+# Required-Start:    $network
+# Required-Stop:     $network
+# Should-Start:      $local_fs
+# Should-Stop:       $local_fs
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: A small script to initialise iptables to allow forwarding and masquerading.
+# Description:       A small script to initialise iptables to allow forwarding and masquerading.
+### END INIT INFO
+
+. /lib/lsb/init-functions
+
+MODPROBE=/sbin/modprobe
+IPTABLES=/sbin/iptables
+if ! [ -r /etc/oci-poc/oci-poc.conf ] ; then
+	echo "Cannot find /etc/oci-poc/oci-poc.conf"
+	exit 1
+fi
+. /etc/oci-poc/oci-poc.conf
+
+GUEST_NUMBER_LIST=$(seq -s ' ' 0 ${NUMBER_OF_GUESTS})
+
+fake_ifs () {
+        echo 1 >/proc/sys/net/ipv4/ip_forward
+        echo 1 >/proc/sys/net/ipv6/conf/all/forwarding
+
+	$MODPROBE dummy
+
+	# Create a dummy interface called mynic0, 1 & 2
+	ip link add ${HOST_DUMMYNET_IFNAME_PREFIX}0 type dummy
+	ip link add ${HOST_DUMMYNET_IFNAME_PREFIX}1 type dummy
+	ip link add ${HOST_DUMMYNET_IFNAME_PREFIX}2 type dummy
+	ip link add ${HOST_DUMMYNET_IFNAME_PREFIX}3 type dummy
+
+	# Set its MAC address
+	ifconfig ${HOST_DUMMYNET_IFNAME_PREFIX}0 hw ether ${HOST_DUMMYNET_MAC_PREFIX}:cc
+	ifconfig ${HOST_DUMMYNET_IFNAME_PREFIX}1 hw ether ${HOST_DUMMYNET_MAC_PREFIX}:dd
+	ifconfig ${HOST_DUMMYNET_IFNAME_PREFIX}2 hw ether ${HOST_DUMMYNET_MAC_PREFIX}:ee
+	ifconfig ${HOST_DUMMYNET_IFNAME_PREFIX}3 hw ether ${HOST_DUMMYNET_MAC_PREFIX}:ff
+
+	# Add a tap devices
+	for i in ${GUEST_NUMBER_LIST} ; do
+		ip tuntap add dev ${GUEST_TAPIF_PREFIX}${i}eth0 mode tap user root
+		ip tuntap add dev ${GUEST_TAPIF_PREFIX}${i}eth1 mode tap user root
+		ip tuntap add dev ${GUEST_TAPIF_PREFIX}${i}eth2 mode tap user root
+		ip tuntap add dev ${GUEST_TAPIF_PREFIX}${i}eth3 mode tap user root
+	done
+
+	# Create a bridge, and bridge to it mynic0 and all taps
+	brctl addbr ${HOST_BRIDGE_NAME_PREFIX}0
+	brctl addbr ${HOST_BRIDGE_NAME_PREFIX}1
+	brctl addbr ${HOST_BRIDGE_NAME_PREFIX}2
+	brctl addbr ${HOST_BRIDGE_NAME_PREFIX}3
+	brctl addif ${HOST_BRIDGE_NAME_PREFIX}0 ${HOST_DUMMYNET_IFNAME_PREFIX}0
+	brctl addif ${HOST_BRIDGE_NAME_PREFIX}1 ${HOST_DUMMYNET_IFNAME_PREFIX}1
+	brctl addif ${HOST_BRIDGE_NAME_PREFIX}2 ${HOST_DUMMYNET_IFNAME_PREFIX}2
+	brctl addif ${HOST_BRIDGE_NAME_PREFIX}3 ${HOST_DUMMYNET_IFNAME_PREFIX}3
+	for i in ${GUEST_NUMBER_LIST} ; do
+		brctl addif ${HOST_BRIDGE_NAME_PREFIX}0 ${GUEST_TAPIF_PREFIX}${i}eth0
+		brctl addif ${HOST_BRIDGE_NAME_PREFIX}1 ${GUEST_TAPIF_PREFIX}${i}eth1
+		brctl addif ${HOST_BRIDGE_NAME_PREFIX}2 ${GUEST_TAPIF_PREFIX}${i}eth2
+		brctl addif ${HOST_BRIDGE_NAME_PREFIX}3 ${GUEST_TAPIF_PREFIX}${i}eth3
+	done
+
+	# Set IP addresses on each bridge
+	ifconfig ${HOST_BRIDGE_NAME_PREFIX}0 ${HOST_NETWORK_PREFIX}.1 netmask 255.255.255.0 up
+	ifconfig ${HOST_BRIDGE_NAME_PREFIX}1 ${OPENSTACK_MGMT_NET_PREFIX}.1 netmask 255.255.255.0 up
+	ifconfig ${HOST_BRIDGE_NAME_PREFIX}2 ${OPENSTACK_VMNET_PREFIX}.1 netmask 255.255.255.0 up
+	ifconfig ${HOST_BRIDGE_NAME_PREFIX}3 ${OPENSTACK_OCTAVIA_NET_PREFIX}.1 netmask 255.255.255.0 up
+
+	# also v6...
+	#ip addr add fd5d:12c9:2201:1::1/24 dev ${HOST_BRIDGE_NAME}
+
+	# Add all provider networks to the eth0 bridge
+	for network_cidr in ${CLUSTER_NETWORK_CIDRS} ; do
+		IP_MIN=$(ipcalc ${network_cidr} | grep ^HostMin: | awk '{print $2}')
+		CIDR=$(echo ${network_cidr} | cut -d/ -f2)
+		IP_CIDR=${IP_MIN}/${CIDR}
+		ip addr add ${IP_CIDR} dev ${HOST_BRIDGE_NAME_PREFIX}0
+	done
+
+	# Make sure all interfaces are up
+	ip link set ${HOST_BRIDGE_NAME_PREFIX}0 up
+	ip link set ${HOST_BRIDGE_NAME_PREFIX}1 up
+	ip link set ${HOST_BRIDGE_NAME_PREFIX}2 up
+	ip link set ${HOST_BRIDGE_NAME_PREFIX}3 up
+	for i in ${GUEST_NUMBER_LIST} ; do
+		ip link set ${GUEST_TAPIF_PREFIX}${i}eth0 up
+		ip link set ${GUEST_TAPIF_PREFIX}${i}eth1 up
+		ip link set ${GUEST_TAPIF_PREFIX}${i}eth2 up
+		ip link set ${GUEST_TAPIF_PREFIX}${i}eth3 up
+	done
+
+	# Add the gateway for the VIP
+	ip addr add ${OPENSTACK_VIP_NET_PREFIX}.1/24 dev ${HOST_BRIDGE_NAME_PREFIX}1
+
+	# Set basic masquerading for ipv4, DHCP network...
+	iptables -I FORWARD -s ${HOST_NETWORK_PREFIX}.0/24 -j ACCEPT
+	iptables -t nat -I POSTROUTING -s ${HOST_NETWORK_PREFIX}.0/24 -o ${HOST_MGMT_INTERFACE} -j MASQUERADE
+
+	# ... and OpenStack MGMT network ...
+	iptables -I FORWARD -s ${OPENSTACK_MGMT_NET_PREFIX}.0/24 -j ACCEPT
+	iptables -t nat -I POSTROUTING -s ${OPENSTACK_MGMT_NET_PREFIX}.0/24 -o ${HOST_MGMT_INTERFACE} -j MASQUERADE
+
+	# ... and the VIP network ...
+	iptables -I FORWARD -s ${OPENSTACK_VIP_NET_PREFIX}.0/24
+	iptables -t nat -I POSTROUTING -s ${OPENSTACK_VIP_NET_PREFIX}.0/24 -o ${HOST_MGMT_INTERFACE} -j MASQUERADE
+
+	# ... and the Octavia MGMT network ...
+	iptables -I FORWARD -s ${OPENSTACK_OCTAVIA_NET_PREFIX}.0/24
+	iptables -t nat -I POSTROUTING -s ${OPENSTACK_OCTAVIA_NET_PREFIX}.0/24 -o ${HOST_MGMT_INTERFACE} -j MASQUERADE
+
+	# Add all cluster networks configured
+	for network_cidr in ${CLUSTER_NETWORK_CIDRS} ; do
+		iptables -I FORWARD -s ${network_cidr} -j ACCEPT
+		iptables -t nat -I POSTROUTING -s ${network_cidr} -o ${HOST_MGMT_INTERFACE} -j MASQUERADE
+	done
+	#ip6tables -I FORWARD -s ${HOST_BRIDGE_NET6} -j ACCEPT
+	#ip6tables -t nat -I POSTROUTING -s ${HOST_BRIDGE_NET6} -j MASQUERADE
+
+	# Forward to OCI's web interface
+	iptables -t nat -I PREROUTING -p tcp -i ${HOST_MGMT_INTERFACE} --dport 80 -j DNAT --to-destination ${OCI_VM_IP}:80
+	iptables -t nat -I PREROUTING -p tcp -i ${HOST_MGMT_INTERFACE} --dport 443 -j DNAT --to-destination ${OCI_VM_IP}:443
+	# Forward the radius ports 1812 and 1813
+	iptables -t nat -I PREROUTING -p udp -i ${HOST_MGMT_INTERFACE} --dport 1812 -j DNAT --to-destination ${OCI_VM_IP}:1812
+	iptables -t nat -I PREROUTING -p udp -i ${HOST_MGMT_INTERFACE} --dport 1813 -j DNAT --to-destination ${OCI_VM_IP}:1813
+}
+
+stop_fake_ifs () {
+        iptables -F FORWARD
+        ip6tables -F FORWARD
+        iptables -t nat -F POSTROUTING
+        ip6tables -t nat -F POSTROUTING
+
+        #ip addr del ${HOST_BRIDGE_NET6} dev ${HOST_BRIDGE_NAME} || true
+        ifconfig ${HOST_BRIDGE_NAME_PREFIX}0 down || true
+        ifconfig ${HOST_BRIDGE_NAME_PREFIX}1 down || true
+        ifconfig ${HOST_BRIDGE_NAME_PREFIX}2 down || true
+        ifconfig ${HOST_BRIDGE_NAME_PREFIX}3 down || true
+        brctl delif ${HOST_BRIDGE_NAME_PREFIX}0 ${HOST_DUMMYNET_IFNAME_PREFIX}0 || true
+        brctl delif ${HOST_BRIDGE_NAME_PREFIX}1 ${HOST_DUMMYNET_IFNAME_PREFIX}1 || true
+        brctl delif ${HOST_BRIDGE_NAME_PREFIX}2 ${HOST_DUMMYNET_IFNAME_PREFIX}2 || true
+        brctl delif ${HOST_BRIDGE_NAME_PREFIX}3 ${HOST_DUMMYNET_IFNAME_PREFIX}3 || true
+	for i in ${GUEST_NUMBER_LIST} ; do
+	        brctl delif ${HOST_BRIDGE_NAME_PREFIX}0 ${GUEST_TAPIF_PREFIX}${i}eth0 || true
+	        brctl delif ${HOST_BRIDGE_NAME_PREFIX}1 ${GUEST_TAPIF_PREFIX}${i}eth1 || true
+	        brctl delif ${HOST_BRIDGE_NAME_PREFIX}2 ${GUEST_TAPIF_PREFIX}${i}eth2 || true
+	        brctl delif ${HOST_BRIDGE_NAME_PREFIX}3 ${GUEST_TAPIF_PREFIX}${i}eth3 || true
+	done
+	# Add all cluster networks configured
+	for network_cidr in ${CLUSTER_NETWORK_CIDRS} ; do
+		IP_MIN=$(ipcalc ${network_cidr} | grep ^HostMin: | awk '{print $2}')
+		CIDR=$(echo ${network_cidr} | cut -d/ -f2)
+		IP_CIDR=${IP_MIN}/${CIDR}
+		ip addr del ${IP_CIDR} dev ${HOST_BRIDGE_NAME_PREFIX}0
+	done
+        brctl delbr ${HOST_BRIDGE_NAME_PREFIX}0 || true
+        brctl delbr ${HOST_BRIDGE_NAME_PREFIX}1 || true
+        brctl delbr ${HOST_BRIDGE_NAME_PREFIX}2 || true
+        brctl delbr ${HOST_BRIDGE_NAME_PREFIX}3 || true
+        ip link delete ${HOST_DUMMYNET_IFNAME_PREFIX}0 || true
+        ip link delete ${HOST_DUMMYNET_IFNAME_PREFIX}1 || true
+        ip link delete ${HOST_DUMMYNET_IFNAME_PREFIX}2 || true
+        ip link delete ${HOST_DUMMYNET_IFNAME_PREFIX}3 || true
+	for i in ${GUEST_NUMBER_LIST} ; do
+	        ip tuntap delete ${GUEST_TAPIF_PREFIX}${i}eth0 mod tap || true
+	        ip tuntap delete ${GUEST_TAPIF_PREFIX}${i}eth1 mod tap || true
+	        ip tuntap delete ${GUEST_TAPIF_PREFIX}${i}eth2 mod tap || true
+	        ip tuntap delete ${GUEST_TAPIF_PREFIX}${i}eth3 mod tap || true
+	done
+}
+
+case "${1}" in
+manual-start)
+	set -e
+	set -x
+	fake_ifs
+;;
+start|systemd-start)
+        fake_ifs
+;;
+manual-stop)
+	set -e
+	set -x
+	stop_fake_ifs
+;;
+stop)
+	stop_fake_ifs
+;;
+restart|reload|force-reload)
+	$0 stop
+	sleep 1
+	$0 start
+;;
+*)
+	echo "Usage: $0 {start|stop|restart|reload}"
+	exit 1
+;;
+esac
+
+exit 0

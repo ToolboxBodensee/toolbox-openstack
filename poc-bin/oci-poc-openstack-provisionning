@@ -1,0 +1,213 @@
+#!/bin/sh
+
+set -e
+set -x
+
+if ! [ -e /root/oci-openrc ] ; then
+	echo "Cloud not find /root/oci-openrc"
+	exit 1
+fi
+
+. /root/oci-openrc
+
+echo "===> Discovering compute hosts..."
+su nova -s /bin/sh -c "nova-manage cell_v2 discover_hosts"
+
+echo "===> Listing compute hosts..."
+openstack hypervisor list
+
+echo "===> Uploading Debian image..."
+DEB_IMAGE_FILE=$(ls debian-*-amd64.qcow2)
+if [ -z "${DEB_IMAGE_FILE}" ] ; then
+	echo "Please upload a debian Qcow2 image in /root/debian-*-amd64.qcow2"
+	exit 1
+fi
+UPLOADED_IMAGE=$(openstack image list -f value -c Name 2>/dev/null)
+
+if [ "${DEB_IMAGE_FILE}" != "${UPLOADED_IMAGE}" ] ; then
+	openstack image create \
+	--container-format bare --disk-format qcow2 \
+	--file ${DEB_IMAGE_FILE} \
+	--public \
+	${DEB_IMAGE_FILE}
+fi
+
+create_flavor_if_not_exist () {
+	local FLAVOR_NAME FLAVOR_RAM FLAVOR_DISK FLAVOR_VCPU
+	FLAVOR_NAME=${1}
+	FLAVOR_RAM=${2}
+	FLAVOR_DISK=${3}
+	FLAVOR_VCPU=${4}
+	FLAVOR_ID=$(openstack flavor list -f csv 2>/dev/null | q -H -d , "SELECT * FROM - WHERE Name='${FLAVOR_NAME}'" 2>/dev/null | cut -d , -f 1)
+	if [ -z "${FLAVOR_ID}" ] ; then
+		openstack flavor create --ram ${FLAVOR_NAME} --disk ${FLAVOR_RAM} --vcpus ${FLAVOR_VCPU} ${FLAVOR_NAME}
+	fi
+}
+
+echo "===> Creating flavors..."
+create_flavor_if_not_exist demo-flavor 2048 5 1
+create_flavor_if_not_exist cpu1-ram3-disk10 3072 10 1
+create_flavor_if_not_exist cpu1-ram3-disk20 3072 20 1
+create_flavor_if_not_exist cpu1-ram6-disk10 6144 10 1
+create_flavor_if_not_exist cpu1-ram6-disk20 6144 20 1
+
+echo "===> Setting-up rating..."
+HASHMAP_ENABLED=$(cloudkitty module list -f csv | q -H -d , "SELECT Enabled FROM - WHERE Module='hashmap'")
+if [ "${HASHMAP_ENABLED}" != "True" ] ; then
+	cloudkitty module enable hashmap
+	cloudkitty module set priority hashmap 100
+fi
+HASHMAP_GROUP_ID=$(cloudkitty hashmap group list -f csv | q -H -d , "SELECT * FROM - WHERE Name='instance_uptime_flavor'" 2>/dev/null | cut -d , -f 2)
+if [ -z "${HASHMAP_GROUP_ID}" ] ; then
+	cloudkitty hashmap group create instance_uptime_flavor
+	HASHMAP_GROUP_ID=$(cloudkitty hashmap group list -f csv | q -H -d , "SELECT * FROM - WHERE Name='instance_uptime_flavor'" 2>/dev/null | cut -d , -f 2)
+fi
+
+COMPUTE_SERVICE_ID=$(cloudkitty hashmap service list -f csv | q -H -d , "SELECT * FROM - WHERE Name='compute'" 2>/dev/null | cut -d , -f 2)
+if [ -z "${COMPUTE_SERVICE_ID}" ] ; then
+	cloudkitty hashmap service create compute
+	COMPUTE_SERVICE_ID=$(cloudkitty hashmap service list -f csv | q -H -d , "SELECT * FROM - WHERE Name='compute'" 2>/dev/null | cut -d , -f 2)
+fi
+
+FIELD_ID=$(cloudkitty hashmap field list -f csv ${COMPUTE_SERVICE_ID} | q -H -d , "SELECT * FROM - WHERE Name='flavor'" 2>/dev/null | cut -d , -f 2)
+if [ -z "${FIELD_ID}" ] ; then
+	cloudkitty hashmap field create ${COMPUTE_SERVICE_ID} flavor
+	FIELD_ID=$(cloudkitty hashmap field list -f csv ${COMPUTE_SERVICE_ID} | q -H -d , "SELECT * FROM - WHERE Name='flavor'" 2>/dev/null | cut -d , -f 2)
+fi
+
+create_flavor_mapping_if_not_exists () {
+	FLAVOR_NAME=${1}
+	FLAVOR_PRICE=${2}
+	MAPPING_ID=$(cloudkitty hashmap mapping list --field-id ${FIELD_ID}  -g ${HASHMAP_GROUP_ID} -f csv | q -H -d , "SELECT * FROM - WHERE Value='${FLAVOR_NAME}'" 2>/dev/null | cut -d , -f 1)
+	if [ -z "${MAPPING_ID}" ] ; then
+		cloudkitty hashmap mapping create --field-id ${FIELD_ID} --value ${FLAVOR_NAME} -t flat -g ${HASHMAP_GROUP_ID} ${FLAVOR_PRICE}
+	fi
+}
+create_flavor_mapping_if_not_exists demo-flavor 0.03
+create_flavor_mapping_if_not_exists cpu1-ram3-disk10 0.04
+create_flavor_mapping_if_not_exists cpu1-ram3-disk20 0.05
+create_flavor_mapping_if_not_exists cpu1-ram6-disk10 0.07
+create_flavor_mapping_if_not_exists cpu1-ram6-disk20 0.08
+
+# Add role rating to the admin user
+openstack role add --user admin --project admin rating
+
+echo "===> Fixing-up keypair ..."
+chmod 600 .ssh/id_rsa
+chmod 600 .ssh/id_rsa.pub
+KEYPAIR_NAME=$(openstack keypair list -f csv 2>/dev/null | q -H -d , "SELECT * FROM - WHERE Name='demo-keypair'" 2>/dev/null | cut -d , -f 1)
+if [ -z "${KEYPAIR_NAME}" ] ; then
+	openstack keypair create --public-key ~/.ssh/id_rsa.pub demo-keypair
+fi
+
+echo "===> Fixing-up networking ..."
+# Create external network
+EXT_NET_NETWORK_ID=$(openstack network list -f csv 2>/dev/null | q -H -d , "SELECT * FROM - WHERE Name='ext-net'" 2>/dev/null | cut -d , -f 1)
+if [ -z "${EXT_NET_NETWORK_ID}" ] ; then
+	openstack network create --external --provider-physical-network external --provider-network-type flat ext-net
+	EXT_NET_NETWORK_ID=$(openstack network list -f csv 2>/dev/null | q -H -d , "SELECT * FROM - WHERE Name='ext-net'" 2>/dev/null | cut -d , -f 1)
+fi
+# Create external subnet
+EXT_NET_SUBNET_ID=$(openstack subnet list -f csv 2>/dev/null | q -H -d , "SELECT * FROM - WHERE Name='ext-subnet'" 2>/dev/null | cut -d , -f 1)
+if [ -z "${EXT_NET_SUBNET_ID}" ] ; then
+	openstack subnet create --network ext-net \
+		--allocation-pool start=192.168.105.100,end=192.168.105.199 \
+		--dns-nameserver 84.16.67.69 \
+		--gateway 192.168.105.1 \
+		--subnet-range 192.168.105.0/24 \
+		--no-dhcp ext-subnet
+	EXT_NET_SUBNET_ID=$(openstack subnet list -f csv 2>/dev/null | q -H -d , "SELECT * FROM - WHERE Name='ext-subnet'" 2>/dev/null | cut -d , -f 1)
+fi
+
+# Create internal network
+DEMO_NET_NETWORK_ID=$(openstack network list -f csv 2>/dev/null | q -H -d , "SELECT * FROM - WHERE Name='demo-net'" 2>/dev/null | cut -d , -f 1)
+if [ -z "${DEMO_NET_NETWORK_ID}" ] ; then
+	openstack network create --share demo-net
+	DEMO_NET_NETWORK_ID=$(openstack network list -f csv 2>/dev/null | q -H -d , "SELECT * FROM - WHERE Name='demo-net'" 2>/dev/null | cut -d , -f 1)
+fi
+
+DEMO_NET_SUBNET_ID=$(openstack subnet list -f csv 2>/dev/null | q -H -d , "SELECT * FROM - WHERE Name='demo-subnet'" 2>/dev/null | cut -d , -f 1)
+if [ -z "${DEMO_NET_SUBNET_ID}" ] ; then
+	openstack subnet create --network demo-net --subnet-range 192.168.200.0/24 --dns-nameserver 84.16.67.69 demo-subnet
+	DEMO_NET_SUBNET_ID=$(openstack subnet list -f csv 2>/dev/null | q -H -d , "SELECT * FROM - WHERE Name='demo-subnet'" 2>/dev/null | cut -d , -f 1)
+fi
+
+# Create router, add it to demo-subnet and set it as gateway
+ROUTER_ID=$(openstack router list -f csv 2>/dev/null | q -H -d , "SELECT * FROM - WHERE Name='demo-router'" 2>/dev/null | cut -d , -f 1)
+if [ -z "${}" ] ; then
+	openstack router create demo-router
+	ROUTER_ID=$(openstack router list -f csv 2>/dev/null | q -H -d , "SELECT * FROM - WHERE Name='demo-router'" 2>/dev/null | cut -d , -f 1)
+fi
+
+# Attach demo-subnet to demo-router
+SUBNET_ID_IN_ROUTER=$(openstack router show demo-router -f value -c interfaces_info 2>/dev/null | jq --raw-output '.[]["subnet_id"]')
+if [ -z "${SUBNET_ID_IN_ROUTER}" ] ; then
+	openstack router add subnet demo-router demo-subnet
+fi
+
+ROUTER_GATEWAY_INFO=$(openstack router show demo-router -f value -c external_gateway_info 2>/dev/null)
+#ROUTER_GATEWAY_NETWORK_ID=$(openstack router show demo-router -f value -c external_gateway_info 2>/dev/null | jq --raw-output '.["network_id"]')
+if [ "${ROUTER_GATEWAY_INFO}" = "None" ] ; then
+	openstack router set demo-router --external-gateway ext-net
+fi
+
+# Create a few floating IPs
+FLOATING_COUNT=$(openstack floating ip list -f csv 2>/dev/null | q -H -d , "SELECT COUNT(ID) FROM -" 2>/dev/null)
+if [ -z "${FLOATING_COUNT}" -o "${FLOATING_COUNT}" -lt 5 ] ; then
+	openstack floating ip create ext-net
+	openstack floating ip create ext-net
+	openstack floating ip create ext-net
+	openstack floating ip create ext-net
+	openstack floating ip create ext-net
+fi
+
+echo "===> Setting-up security group ..."
+# Add rules to the admin's security group to allow ping and ssh
+SECURITY_GROUP=$(openstack security group list --project admin --format=csv 2>/dev/null | q -d , -H 'SELECT ID FROM -')
+SSH_RULE_ID=$(openstack security group rule list -f csv ${SECURITY_GROUP} 2>/dev/null | q -H -d , "SELECT ID FROM - WHERE \`IP Protocol\`='tcp' AND \`Port Range\`='22:22' AND \`IP Range\`='0.0.0.0/0'")
+if [ -z "${SSH_RULE_ID}" ] ; then
+	openstack security group rule create --ingress --protocol tcp --dst-port 22 ${SECURITY_GROUP}
+fi
+ICPM_RULE_ID=$(openstack security group rule list -f csv ${SECURITY_GROUP} 2>/dev/null | q -H -d , "SELECT ID FROM - WHERE \`IP Protocol\`='icmp' AND \`IP Range\`='0.0.0.0/0'")
+if [ -z "${ICMP_RULE_ID}" ] ; then
+	openstack security group rule create --protocol icmp --ingress ${SECURITY_GROUP}
+fi
+
+echo "===> Setting-up Octavia ..."
+apt-get install -y openstack-pkg-tools
+oci-octavia-amphora-secgroups-sshkey-lbrole-and-network
+oci-octavia-certs
+
+# Fix the new values for Octavia in the cluster's value
+ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no oci-puppet-master.infomaniak.ch "apt-get install -y openstack-cluster-installer-cli"
+pkgos_inifile get /etc/octavia/octavia.conf controller_worker amp_boot_network_list
+OCTAVIA_NET=$RET
+pkgos_inifile get /etc/octavia/octavia.conf controller_worker amp_secgroup_list
+OCTAVIA_SECGROUP=$RET
+ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no oci-puppet-master.infomaniak.ch "OCI_API_URL=http://localhost/oci/api.php? ocicli cluster-set z --amp-boot-network-list ${OCTAVIA_NET} --amp-secgroup-list ${OCTAVIA_SECGROUP}"
+
+# Copy the Octavia certs and ssh keys to the other controllers.
+# Set the network boot and security group list as well
+ME=$(hostname --fqdn)
+for i in $(grep controller /etc/hosts | grep -v ${ME} | awk '{print $2}') ; do
+	rsync -e 'ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no' -avz --delete /etc/octavia/.ssh/ root@${i}:/etc/octavia/.ssh/ ;
+	rsync -e 'ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no' -avz --delete /etc/octavia/certs/ root@${i}:/etc/octavia/certs/ ;
+	ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no root@${i} "apt-get install -y openstack-pkg-tools"
+	ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no root@${i} ". /usr/share/openstack-pkg-tools/pkgos_func ; pkgos_inifile set /etc/octavia/octavia.conf controller_worker amp_secgroup_list ${OCTAVIA_SECGROUP} ; pkgos_inifile set /etc/octavia/octavia.conf controller_worker amp_boot_network_list ${OCTAVIA_NET}"
+	ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no root@${i} "/etc/init.d/octavia-api restart"
+	ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no root@${i} "/etc/init.d/octavia-health-manager restart"
+	ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no root@${i} "/etc/init.d/octavia-housekeeping restart"
+	ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no root@${i} "/etc/init.d/octavia-worker restart"
+done
+
+# Create the load-balancer_admin role
+LB_ADMIN_ROLE_ID=$(openstack role list -f csv 2>/dev/null | q -H -d , "SELECT ID FROM - WHERE Name='load-balancer_admin'")
+if [ -z "${LB_ADMIN_ROLE_ID}" ] ; then
+	openstack role create load-balancer_admin
+fi
+
+# Assign it to admin
+LB_ADMIN_ROLE_ASSIGNED=$(openstack role assignment list --user admin --project admin --names -f csv 2>/dev/null | q -H -d , "SELECT Role FROM - WHERE Role='load-balancer_admin'")
+if [ -z "${LB_ADMIN_ROLE_ASSIGNED}" ] ; then
+	openstack role add --project admin --user admin load-balancer_admin
+fi

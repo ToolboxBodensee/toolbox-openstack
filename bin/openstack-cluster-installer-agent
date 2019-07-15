@@ -1,0 +1,63 @@
+#!/bin/sh
+
+set -e
+set -x
+
+PXE_SERVER_IP=$(cat /etc/oci/pxe-server-ip)
+
+# Get all disks:
+TMPFILE=$(mktemp -t openstack-cluster-installer-agent.XXXXXX)
+lsblk -b -l -d -J --exclude 2,7,11 >${TMPFILE}
+TMPFILE2=$(mktemp -t openstack-cluster-installer-agent.XXXXXX)
+if [ ""$(cat ${TMPFILE} | wc -l) = "0" ] ; then
+	# No disk present
+	echo '{
+   "blockdevices": [
+   ]
+,
+' >${TMPFILE2}
+else
+	NMU_LINES=$(( $(cat ${TMPFILE} | wc -l) - 1))
+	head -n ${NMU_LINES} ${TMPFILE} > ${TMPFILE2}
+	sed -i ${NMU_LINES}'s/$/,/' ${TMPFILE2}
+fi
+
+# Get all interface names
+echo '   "interfaces": [' >>${TMPFILE2}
+for i in $(ip link show | grep -v '^ ' | grep -v 'lo:' | cut -d' ' -f2 | cut -d: -f1) ; do
+	MAC_ADDR=$(ip link show dev $i | grep 'link/ether' | awk '{print $2}')
+	ETH_SPEED=$(( $(lshw -class network 2>/dev/null -json | jq '.[] | select(.serial|test("'${MAC_ADDR}'")) | .capacity') / 1000000))
+	echo '      {"name": "'${i}'", "macaddr": "'${MAC_ADDR}'", "max_speed": "'${ETH_SPEED}'" },' >>${TMPFILE2}
+done
+NMU_LINES=$(cat ${TMPFILE2} | wc -l)
+sed -i ${NMU_LINES}'s/,$//' ${TMPFILE2}
+# End the section
+echo '   ],' >>${TMPFILE2}
+
+# Chassis serial number, product name, BIOS version, IPMI version, IPMI ip
+#CHASSIS_SERIAL=$(dmidecode -s chassis-serial-number)
+SYSTEM_SERIAL=$(dmidecode -s system-serial-number)
+PRODUCT_NAME=$(dmidecode -t 1 | grep "Product Name" | sed -e "s/[ \t]*Product Name:[ ]*//"  -e "s/,//g")
+LADVDC_MINUS_B=$(ladvdc -b | grep -E '^HOSTNAME_0' | sed -e 's/HOSTNAME_0=//' -e "s/'//g")
+BIOS_VERSION=$(dmidecode -s bios-version)
+IPMI_FIRMWARE_VERSION=$(ipmitool mc info | grep "Firmware Revision" | awk '{print $4}')
+IPMI_DETECTED_IP=$(ipmitool lan print 1 | grep -E "IP Address[ ]*:" | sed 's/IP Address[ \t:]*//')
+echo '   "machine": [' >>${TMPFILE2}
+echo '      {"serial": "'${SYSTEM_SERIAL}'", "productname": "'${PRODUCT_NAME}'", "bios_version": "'${BIOS_VERSION}'", "ipmi_firmware_version": "'${IPMI_FIRMWARE_VERSION}'", "ipmi_detected_ip": "'${IPMI_DETECTED_IP}'", "ladvd_report": "'${LADVDC_MINUS_B}'"}' >>${TMPFILE2}
+echo '   ],' >>${TMPFILE2}
+
+
+# Get total amount of RAM
+TOTAL_RAM=$(dmidecode -t memory |  awk '/Size: [0-9]/ {tmp=$2 ; if($3 == "GB") { tmp = $2 * 1024 }; t+=tmp;} END { print t}')
+RAM_TYPE=$(dmidecode -t 17 | grep Type | head -n 1 | awk '{print $2}')
+RAM_SPEED=$(dmidecode -t 17 | grep Speed | head -n 1 | awk '{print $2}')
+RAM_MANUFACTURER=$(dmidecode -t 17 | grep Manufacturer | head -n 1 | awk '{print $2}')
+echo '   "memory": [' >>${TMPFILE2}
+	echo '      {"size": "'${TOTAL_RAM}'", "type": "'${RAM_TYPE}'", "speed": "'${RAM_SPEED}'", "manufacturer": "'${RAM_MANUFACTURER}'" }' >>${TMPFILE2}
+echo '   ]' >>${TMPFILE2}
+echo '}' >>${TMPFILE2}
+
+curl -vX POST --header "Content-Type: application/json" -d @${TMPFILE2} http://${PXE_SERVER_IP}/oci/report.php
+
+rm ${TMPFILE}
+rm ${TMPFILE2}

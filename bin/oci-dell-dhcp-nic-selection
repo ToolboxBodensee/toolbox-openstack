@@ -1,0 +1,98 @@
+#!/bin/sh
+
+set -e
+
+# This script does:
+# Setup the BIOS to whatever network card we want to PXE boot from
+
+RACADM=racadm
+
+usage() {
+	echo "Usage: $0 --pxe-boot-card-num <card number> --lom-card-num <card number>"
+        echo "Example of card numbers: 1, 2, 3, 4, 5, 6, 1g1, 1g2, 1g3, 1g4, 10g1, 10g2, 10g3, 10g4"
+        echo "where 5 means the 5th card in the Dell BIOS, or, to be smarter:"
+        echo "1g1 means first gigabit card, 10g2 means 2nd 10gbits card, etc."
+        exit 1
+}
+
+
+for i in $@ ; do
+	case "${1}" in
+	"--pxe-boot-card-num"|"-p")
+		if [ -z "${2}" ] ; then
+			echo "No parameter defining the pxe card number"
+			usage
+		fi
+		PXEBOOT_CARD_NUM=${2}
+		shift
+		shift
+	;;
+	"--lom-card-num"|"-l")
+		if [ -z "${2}" ] ; then
+			echo "No parameter defining the LOM card number"
+			usage
+		fi
+		LOM_CARD_NUM=${2}
+		shift
+		shift
+	;;
+	esac
+done
+
+if [ -z "${PXEBOOT_CARD_NUM}" ] ; then
+	echo "Warning: no --pxe-boot-card-num parameter!"
+	PXEBOOT_CARD_NUM=1g1
+fi
+
+if [ -z "${LOM_CARD_NUM}" ] ; then
+	echo "Warning: no --lom-card-num parameter!"
+	LOM_CARD_NUM=3
+fi
+
+${RACADM} set iDRAC.NIC.Selection LOM${LOM_CARD_NUM}
+
+# Find the network card that matches where we want to boot on
+TMP_NIC_LIST=$(mktemp)
+${RACADM} hwinventory NIC | grep NIC | cut -d: -f1 >${TMP_NIC_LIST}
+if [ "${PXEBOOT_CARD_NUM}" = "1" ] || [ "${PXEBOOT_CARD_NUM}" = "2" ] || [ "${PXEBOOT_CARD_NUM}" = "3" ] || [ "${PXEBOOT_CARD_NUM}" = "4" ] || [ "${PXEBOOT_CARD_NUM}" = "5" ] || [ "${PXEBOOT_CARD_NUM}" = "6" ] ; then
+	PXE_ONLY_ON_NIC=$(cat ${TMP_NIC_LIST} | head -n ${PXEBOOT_CARD_NUM} | tail -n 1)
+else
+	TMP_NIC_LIST_MATCHING_SPEED=$(mktemp)
+	for card in $(cat ${TMP_NIC_LIST}) ; do
+		CARD_SPEED=$(${RACADM} hwinventory $card | grep "Link Speed" | sed "s/Link Speed:[ ]*//")
+		if [ "${PXEBOOT_CARD_NUM}" = "1g1" ] || [ "${PXEBOOT_CARD_NUM}" = "1g2" ] || [ "${PXEBOOT_CARD_NUM}" = "1g3" ] || [ "${PXEBOOT_CARD_NUM}" = "1g4" ] ; then
+			MYSPEED_CARD_NUM=$(echo ${PXEBOOT_CARD_NUM} | sed s/1g//)
+			if [ "${CARD_SPEED}" = "1000 Mbps" ] ; then
+				echo ${card} >>${TMP_NIC_LIST_MATCHING_SPEED}
+			fi
+		elif [ "${PXEBOOT_CARD_NUM}" = "10g1" ] || [ "${PXEBOOT_CARD_NUM}" = "10g2" ] || [ "${PXEBOOT_CARD_NUM}" = "10g3" ] || [ "${PXEBOOT_CARD_NUM}" = "10g4" ] ; then
+			MYSPEED_CARD_NUM=$(echo ${PXEBOOT_CARD_NUM} | sed s/10g//)
+			if [ "${CARD_SPEED}" = "10 Gbps" ] ; then
+				echo ${card} >>${TMP_NIC_LIST_MATCHING_SPEED}
+			fi
+		fi
+		PXE_ONLY_ON_NIC=$(cat ${TMP_NIC_LIST_MATCHING_SPEED} | head -n ${MYSPEED_CARD_NUM} | tail -n 1)
+	done
+	rm ${TMP_NIC_LIST_MATCHING_SPEED}
+fi
+
+# Only if we found our card...
+if [ "${PXE_ONLY_ON_NIC}" ] ; then
+	# Disable PXE booting on all cards except the selected one where we want to boot from
+	TMP_NIC_CONFIG_LIST=$(mktemp)
+	${RACADM} get NIC.NICConfig | grep -v '^$' >${TMP_NIC_CONFIG_LIST}
+	for card in $(cat ${TMP_NIC_LIST}) ; do
+		CARD_NIC_CONFIG_STRING=$(cat ${TMP_NIC_CONFIG_LIST} | grep ${PXE_ONLY_ON_NIC} | cut -d' ' -f1)
+		# This is the selected card, let's enable PXE
+		if [ "${card}" = "${PXE_ONLY_ON_NIC}" ] ; then
+			${RACADM} set ${CARD_NIC_CONFIG_STRING}.LegacyBootProto PXE
+		# This is *not* the selected card: let's disable PXE
+		else
+			${RACADM} set ${CARD_NIC_CONFIG_STRING}.LegacyBootProto NONE
+		fi
+	done
+	rm ${TMP_NIC_CONFIG_LIST}
+fi
+rm -f ${TMP_NIC_LIST}
+
+${RACADM} set BIOS.BiosBootSettings.BootSeq ${PXE_ONLY_ON_NIC},HardDisk.List.1-1

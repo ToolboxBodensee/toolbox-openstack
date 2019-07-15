@@ -1,0 +1,27 @@
+#!/bin/sh
+
+set -e
+
+SQL_QUERY=${1}
+RESULT_CONTAINS=${2}
+DB_NAME=${3}
+TIMEOUT=${4}
+
+STARTSTAMP=$(date +%s)
+
+TMPFILE=$(mktemp)
+echo "${SQL_QUERY}" >${TMPFILE}
+
+ENLAPSTED=0
+while [ "${ENLAPSTED}" -lt "${TIMEOUT}" ] ; do
+	if /usr/bin/mysql --defaults-extra-file=/root/.my.cnf --database=${DB_NAME} <${TMPFILE} | grep -q ${2} ; then
+		rm ${TMPFILE}
+		exit 0
+	fi
+	CURTIMESTAMP=$(date +%s)
+	ENLAPSTED=$((${CURTIMESTAMP} - ${STARTSTAMP}))
+	sleep 2
+done
+rm ${TMPFILE}
+echo "Timed out..."
+exit 1

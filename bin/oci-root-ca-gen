@@ -1,0 +1,135 @@
+#!/bin/sh
+
+set -e
+set -x
+
+PKI_CONFIG_ROOT=/etc/openstack-cluster-installer/pki
+
+# This script was made using the tutorial available at:
+# http://pki-tutorial.readthedocs.io/en/latest/expert/index.html
+# This script is made to run in non-interactive mode, with
+# no password on the keyboard what so ever.
+# It will create this:
+#
+# -----------        ----------        ----------------
+# | ROOT CA |   =>   | OCI CA |   =>   | Server certs |
+# -----------        ----------        ----------------
+#
+#
+# To change names and so on, simply edit config files in
+# the /etc/openstack-cluster-installer/pki folder.
+#
+# In production, you'd typically replace ROOT CA and OCI CA
+# by real PKI infrastructure keys (ie: you'd only genreate keys
+# for the Component CA).
+
+print_header() {
+    if [ -n "$(set | grep xtrace)" ]; then
+      set +x
+      local enable_xtrace='yes'
+    fi
+    echo "===================================================================================================="
+    echo $1
+    echo "===================================================================================================="
+    if [ -n "${enable_xtrace}" ]; then
+      set -x
+    fi
+}
+
+print_header "0. Delete everything"
+rm -rf ca crl certs
+
+print_header "1.1 create directories"
+cd ${PKI_CONFIG_ROOT}
+for i in ca/root-ca/private ca/root-ca/db crl certs ; do
+	mkdir -p ${PKI_CONFIG_ROOT}/${i}
+done
+
+print_header "1.2 create database"
+cp /dev/null ${PKI_CONFIG_ROOT}/ca/root-ca/db/root-ca.db
+cp /dev/null ${PKI_CONFIG_ROOT}/ca/root-ca/db/root-ca.db.attr
+echo 01 > ${PKI_CONFIG_ROOT}/ca/root-ca/db/root-ca.crt.srl
+echo 01 > ${PKI_CONFIG_ROOT}/ca/root-ca/db/root-ca.crl.srl
+
+print_header "1.3 Create CA request"
+openssl req -new \
+    -nodes \
+    -config ${PKI_CONFIG_ROOT}/root-ca.conf \
+    -out ${PKI_CONFIG_ROOT}/ca/root-ca.csr \
+    -keyout ${PKI_CONFIG_ROOT}/ca/root-ca/private/root-ca.key
+
+print_header "1.4 Create CA certificate (self signed)"
+(echo "y"; echo "y") | \
+openssl ca -selfsign \
+    -config ${PKI_CONFIG_ROOT}/root-ca.conf \
+    -in ${PKI_CONFIG_ROOT}/ca/root-ca.csr \
+    -out ${PKI_CONFIG_ROOT}/ca/root-ca.crt \
+    -extensions root_ca_ext \
+    -enddate 20301231235959Z
+
+print_header "1.5 Create initial CRL"
+openssl ca -gencrl \
+    -config ${PKI_CONFIG_ROOT}/root-ca.conf \
+    -out ${PKI_CONFIG_ROOT}/crl/root-ca.crl
+
+print_header "2. Create OCI CA"
+print_header "2.1 Create directories"
+mkdir -p ${PKI_CONFIG_ROOT}/ca/oci-ca/private ${PKI_CONFIG_ROOT}/ca/oci-ca/db
+chmod 700 ${PKI_CONFIG_ROOT}/ca/oci-ca/private
+
+print_header "2.2 Create database"
+cp /dev/null ${PKI_CONFIG_ROOT}/ca/oci-ca/db/oci-ca.db
+cp /dev/null ${PKI_CONFIG_ROOT}/ca/oci-ca/db/oci-ca.db.attr
+echo 01 > ${PKI_CONFIG_ROOT}/ca/oci-ca/db/oci-ca.crt.srl
+echo 01 > ${PKI_CONFIG_ROOT}/ca/oci-ca/db/oci-ca.crl.srl
+
+print_header "2.3 Create CA request"
+openssl req -new \
+    -nodes \
+    -config ${PKI_CONFIG_ROOT}/oci-ca.conf \
+    -out ${PKI_CONFIG_ROOT}/ca/oci-ca.csr \
+    -keyout ${PKI_CONFIG_ROOT}/ca/oci-ca/private/oci-ca.key
+
+print_header "2.4 Create CA certificate (sign with root CA)"
+(echo "y"; echo "y") | \
+openssl ca \
+    -config ${PKI_CONFIG_ROOT}/root-ca.conf \
+    -in ${PKI_CONFIG_ROOT}/ca/oci-ca.csr \
+    -out ${PKI_CONFIG_ROOT}/ca/oci-ca.crt \
+    -enddate 20301231235959Z
+
+#print_header "2.5 Create initial CRL"
+#openssl ca -gencrl \
+#    -config ${PKI_CONFIG_ROOT}/oci-ca.conf \
+#    -out ${PKI_CONFIG_ROOT}/crl/oci-ca.crl
+
+print_header "2.6 Create PEM bundle"
+cat ${PKI_CONFIG_ROOT}/ca/oci-ca.crt ${PKI_CONFIG_ROOT}/ca/root-ca.crt > \
+    ${PKI_CONFIG_ROOT}/ca/oci-ca-chain.pem
+
+print_header "7. Publish Certificates"
+print_header "7.1 Create DER certificate"
+openssl x509 \
+    -in ${PKI_CONFIG_ROOT}/ca/root-ca.crt \
+    -out ${PKI_CONFIG_ROOT}/ca/root-ca.cer \
+    -outform der
+
+#print_header "7.2 Create DER CRL"
+#openssl crl \
+#    -in ${PKI_CONFIG_ROOT}/crl/oci-ca.crl \
+#    -out ${PKI_CONFIG_ROOT}/crl/oci-ca.crl \
+#    -outform der
+
+#########################
+print_header "Copying ca certs to be copied to slave nodes"
+
+# When provisionning servers, all of the certs in this folder will end up in
+# the slave nodes in /etc/ssl/certs. So we just push our 3 CA's certs there.
+CLIENT_KEYS_FOLDER=/var/lib/oci/ssl
+mkdir -p ${CLIENT_KEYS_FOLDER}/ca
+cp ${PKI_CONFIG_ROOT}/ca/root-ca.crt ${CLIENT_KEYS_FOLDER}/ca/oci-pki-root-ca.pem
+cp ${PKI_CONFIG_ROOT}/ca/oci-ca.crt ${CLIENT_KEYS_FOLDER}/ca/oci-pki-oci-ca.pem
+cp ${PKI_CONFIG_ROOT}/ca/oci-ca-chain.pem ${CLIENT_KEYS_FOLDER}/ca/oci-pki-oci-ca-chain.pem
+chown -R www-data:www-data ${CLIENT_KEYS_FOLDER}/ca
+chgrp www-data /var/lib/oci
+chgrp www-data /var/lib/oci/ssl

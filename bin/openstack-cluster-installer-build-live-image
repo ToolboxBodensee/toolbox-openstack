@@ -1,0 +1,752 @@
+#!/bin/sh
+
+set -e
+set -x
+
+if ! [ -r /etc/openstack-cluster-installer/openstack-cluster-installer.conf ] ; then
+	echo "Could not load /etc/openstack-cluster-installer/openstack-cluster-installer.conf"
+	exit 1
+else
+	TMPFILE=$(mktemp -t openstack-cluster-installer.XXXXXX)
+	cat /etc/openstack-cluster-installer/openstack-cluster-installer.conf | grep -v '^\[' >${TMPFILE}
+	. ${TMPFILE}
+	rm ${TMPFILE}
+fi
+
+if [ -x ./openstack-cluster-installer-build-live-image-clean ] ; then
+	./openstack-cluster-installer-build-live-image-clean
+else
+	openstack-cluster-installer-build-live-image-clean
+fi
+
+if ! [ -r /usr/share/openstack-pkg-tools/pkgos_func ] ; then
+	echo "Could not read /usr/share/openstack-pkg-tools/pkgos_func."
+	exit 1
+fi
+. /usr/share/openstack-pkg-tools/pkgos_func
+
+for i in $@ ; do
+	case "${1}" in
+	"--pxe-server-ip")
+		if [ -z "${2}" ] ; then echo "Parameter for option --pxe-server-ip is missing" > /dev/stderr ; DO_EXIT="yes" ; fi
+		OTCI_PXE_SERVER_IP=${2}
+		shift
+		shift
+		;;
+	"--debian-mirror-addr")
+		if [ -z "${2}" ] ; then echo "Parameter for option --debian-mirror-addr is missing" > /dev/stderr ; DO_EXIT="yes" ; fi
+		OTCI_DEB_MIRROR_ADDR=${2}
+		shift
+		shift
+		;;
+	"--debian-security-mirror-addr")
+		if [ -z "${2}" ] ; then echo "Parameter for option --debian-mirror-addr is missing" > /dev/stderr ; DO_EXIT="yes" ; fi
+		OTCI_DEB_SECURITY_MIRROR_ADDR=${2}
+		shift
+		shift
+	;;
+	*)
+		;;
+	esac
+done
+
+if [ -z "${OTCI_PXE_SERVER_IP}" ] ; then
+	DEFROUTE_IF=`awk '{ if ( $2 == "00000000" ) print $1 }' /proc/net/route`
+	if [ -n "${DEFROUTE_IF}" ] ; then
+		if [ -x /bin/ip ] ; then
+			DEFROUTE_IP=`LC_ALL=C ip addr show "${DEFROUTE_IF}" | grep inet | head -n 1 | awk '{print $2}' | cut -d/ -f1 | grep -E '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$'`
+		else
+			DEFROUTE_IP=`hostname -i | grep -E '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$'`
+		fi
+	fi
+	if [ -n "${DEFROUTE_IP}" ] ; then
+		OTCI_PXE_SERVER_IP=${DEFROUTE_IP}
+	else
+		OTCI_PXE_SERVER_IP=$(ipcalc ${OPENSTACK_CLUSTER_NETWORK} | grep HostMin | awk '{print $2}')
+	fi
+        echo "No --pxe-server-ip given, using ${OTCI_PXE_SERVER_IP} as default." > /dev/stderr
+        OTCI_PXE_SERVER_IP=${OTCI_PXE_SERVER_IP}
+fi
+
+if [ -z "${OTCI_DEB_MIRROR_ADDR}" ] ; then
+	echo "No Debian mirror address given, using ${debian_mirror} as default."
+	OTCI_DEB_MIRROR_ADDR=${debian_mirror}
+fi
+if [ -z "${OTCI_DEB_SECURITY_MIRROR_ADDR}" ] ; then
+	echo "No security mriror address given, using ${debian_security_mirror} as default."
+	OTCI_DEB_SECURITY_MIRROR_ADDR=${debian_security_mirror}
+fi
+
+if [ "${DO_EXIT}" = "yes" ] ; then
+	echo "Parameters not validated: will exit now!" > /dev/stderr
+	echo "Example call: $0 --pxe-server-ip ${OTCI_PXE_SERVER_IP} --debian-mirror-addr http://${OTCI_PXE_SERVER_IP}:9999/debian" > /dev/stderr
+	exit 1
+fi
+
+# Manage ssh keys
+if [ -e /etc/openstack-cluster-installer/id_rsa.pub ] ; then
+	echo "Will use existing /etc/openstack-cluster-installer/id_rsa.pub file"
+else
+	echo "No ssh key found, generating one"
+	ssh-keygen -b 4096 -t rsa -f /etc/openstack-cluster-installer/id_rsa -q -N ""
+fi
+if ! [ -e /etc/openstack-cluster-installer/authorized_keys ] ; then
+	cat /etc/openstack-cluster-installer/id_rsa.pub >/etc/openstack-cluster-installer/authorized_keys
+	if [ -e /root/.ssh/authorized_keys ] ; then
+		cat /root/.ssh/authorized_keys >>/etc/openstack-cluster-installer/authorized_keys
+	fi
+	chown www-data:www-data /etc/openstack-cluster-installer/id_rsa*
+fi
+
+mkdir -p config/includes.chroot/root/.ssh/
+chmod 700 config/includes.chroot/root/.ssh/
+cp /etc/openstack-cluster-installer/authorized_keys config/includes.chroot/root/.ssh/authorized_keys
+chmod 600 config/includes.chroot/root/.ssh/authorized_keys
+
+# Add our repository with updated openstack-debian-images and lshw
+mkdir -p config/archives/
+if [ "${use_debian_dot_net_backport}" = "yes" ] ; then
+	echo "deb http://${debian_release}-${openstack_release}.debian.net/debian ${debian_release}-${openstack_release}-backports main
+	deb http://${debian_release}-${openstack_release}.debian.net/debian ${debian_release}-${openstack_release}-backports-nochange main
+	" >config/archives/${debian_release}-${openstack_release}.list.chroot
+	cp /etc/openstack-cluster-installer/pubkey.gpg config/archives/${debian_release}-${openstack_release}.key.chroot
+fi
+
+echo "deb ${OTCI_DEB_MIRROR_ADDR} ${debian_release} contrib non-free
+deb-src ${OTCI_DEB_MIRROR_ADDR} ${debian_release} contrib non-free
+" >config/archives/contrib-non-free.list.chroot
+
+if [ "${install_buildd_incoming}" = "yes" ] ; then
+        echo "deb ${debian_incoming_buildd} buildd-sid main
+deb-src ${debian_incoming_buildd} buildd-sid main
+" >config/archives/incoming-buildd.list.chroot
+fi
+
+# Copy the agent
+mkdir -p config/includes.chroot/usr/bin
+cp /usr/bin/openstack-cluster-installer-agent config/includes.chroot/usr/bin
+
+# Add the IP of the PXE server in a configuration file
+# for later use during the install process
+mkdir -p config/includes.chroot/etc/oci
+echo ${OTCI_PXE_SERVER_IP} >config/includes.chroot/etc/oci/pxe-server-ip
+
+mkdir -p config/includes.chroot/etc
+echo "#!/bin/sh
+
+set -e
+
+# Start the thing once...
+/usr/bin/openstack-cluster-installer-agent
+
+# Set status = live
+PXE_SERVER_IP=\$(cat /etc/oci/pxe-server-ip)
+#CHASSIS_SERIAL=\$(dmidecode -s chassis-serial-number)
+SYSTEM_SERIAL=\$(dmidecode -s system-serial-number)
+
+curl \"http://\${PXE_SERVER_IP}/oci/install-status.php?status=live&chassis-serial=\${SYSTEM_SERIAL}\"
+
+CHASSIS_SERIAL_NUM=\$(dmidecode -s chassis-serial-number)
+echo \${CHASSIS_SERIAL_NUM} >/etc/oci_chassis_serial_num
+SYSTEM_SERIAL_NUM=\$(dmidecode -s system-serial-number)
+echo \${SYSTEM_SERIAL_NUM} >/etc/oci_system_serial_num
+
+# Install the daemon
+update-rc.d oci-agent-daemon defaults
+/etc/init.d/oci-agent-daemon start
+
+" >config/includes.chroot/etc/rc.local
+chmod +x config/includes.chroot/etc/rc.local
+
+echo ${openstack_release} >config/includes.chroot/etc/oci_openstack_release
+echo ${debian_release} >config/includes.chroot/etc/oci_debian_release
+echo ${use_debian_dot_net_backport} >config/includes.chroot/etc/oci_use_debian_dot_net_backport
+echo ${install_buildd_incoming} >config/includes.chroot/etc/oci_use_incoming_build
+echo ${debian_incoming_buildd} >config/includes.chroot/etc/oci_incoming_buildd_url
+echo ${install_ceph_upstream_repo} >config/includes.chroot/etc/oci_install_ceph_upstream_repo
+echo ${debian_mirror_ceph} >config/includes.chroot/etc/oci_debian_mirror_ceph
+
+# Customize root and user ~/.screenrc
+mkdir -p config/includes.chroot/root
+echo "startup_message off
+defscrollback 5000
+caption always \"%{= kw}%-w%{= BW}%n %t%{-}%+w %-= @%H  -  %d.%m.%Y  - %c\"
+termcapinfo xterm 'Co#256:AB=\E[48;5;%dm:AF=\E[38;5;%dm'
+defbce on
+term screen-256color
+termcapinfo konsole-256color ti@:te@" >config/includes.chroot/root/.screenrc
+
+mkdir -p config/includes.chroot/home/user
+echo "startup_message off
+defscrollback 5000
+caption always \"%{= kw}%-w%{= BW}%n %t%{-}%+w %-= @%H  -  %d.%m.%Y  - %c\"
+termcapinfo xterm 'Co#256:AB=\E[48;5;%dm:AF=\E[38;5;%dm'
+defbce on
+term screen-256color
+termcapinfo konsole-256color ti@:te@" >config/includes.chroot/home/user/.screenrc
+
+# and /root/.bashrc and /home/user/.bashrc
+echo "# ~/.bashrc: executed by bash(1) for non-login shells.
+
+export LS_OPTIONS='--color=auto'
+eval \"\$(dircolors)\"
+alias ls='ls \${LS_OPTIONS}'
+
+SYSTEM_SERIAL_NUM=\$(cat /etc/oci_system_serial_num)
+
+  BLUE=\"\\[\\033[1;34m\\]\"
+ LGRAY=\"\\[\\033[0;37m\\]\"
+NO_COL=\"\\[\\033[0m\\]\"
+ LBLUE=\"\\[\\033[1;36m\\]\"
+   RED=\"\\[\\033[1;31m\\]\"
+
+export PS1=\${RED}'\\u'\${LGRAY}@\${BLUE}\${SYSTEM_SERIAL_NUM}\${LGRAY}'>_'\${NO_COL}' \\w # '
+
+alias ssh='ssh -A -X'
+
+if [ -f /etc/bash_completion ]; then
+	. /etc/bash_completion
+fi
+
+export PAGER=most
+" > config/includes.chroot/root/.bashrc
+
+echo "HISTCONTROL=ignoreboth
+shopt -s histappend
+HISTSIZE=1000
+HISTFILESIZE=2000
+shopt -s checkwinsize
+
+export LS_OPTIONS='--color=auto'
+eval \"\$(dircolors)\"
+alias ls='ls \${LS_OPTIONS}'
+
+SYSTEM_SERIAL_NUM=\$(cat /etc/oci_system_serial_num)
+
+  BLUE=\"\\[\\033[1;34m\\]\"
+ LGRAY=\"\\[\\033[0;37m\\]\"
+NO_COL=\"\\[\\033[0m\\]\"
+ LBLUE=\"\\[\\033[1;36m\\]\"
+   RED=\"\\[\\033[1;31m\\]\"
+ GREEN=\"\\[\\033[1;32m\\]\"
+export PS1=\${GREEN}'\\u'\${LGRAY}@\${BLUE}\${SYSTEM_SERIAL_NUM}\${LGRAY}'>_'\${NO_COL}' \\w # '
+export PAGER=most
+" >config/includes.chroot/home/user/.bashrc
+
+# Install it as init script daemon (runs every 30 seconds in loop)
+mkdir -p config/includes.chroot/etc/init.d
+echo "#!/bin/sh
+
+### BEGIN INIT INFO
+# Provides:          oci-agent-daemon
+# Required-Start:    \$network
+# Required-Stop:     \$network
+# Should-Start:      \$local_fs
+# Should-Stop:       \$local_fs
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: A small daemon to report slave nodes
+# Description:       A small script to report slave nodes
+### END INIT INFO
+
+DESC=\"OpenStack cluster installer agent daemon (oci-agent-daemon)\"
+NAME=oci-agent-daemon
+DAEMON=/usr/bin/\${NAME}
+PIDFILE=/var/run/oci-agent-daemon.pid
+DAEMON=/usr/bin/oci-agent-daemon
+
+. /lib/lsb/init-functions
+
+do_start() {
+	start-stop-daemon \\
+		--start \\
+		--quiet \\
+		--background \\
+		--make-pidfile --pidfile \${PIDFILE} \\
+		--startas \$DAEMON \\
+		--test > /dev/null \\
+		|| return 1
+	start-stop-daemon \\
+		--start \\
+		--quiet \\
+		--background \\
+		--make-pidfile --pidfile \${PIDFILE} \\
+		--startas \$DAEMON \\
+		|| return 2
+}
+
+do_stop() {
+	start-stop-daemon \\
+		--stop \\
+		--quiet \\
+		--retry=TERM/30/KILL/5 \\
+		--pidfile \$PIDFILE
+	RETVAL=\$?
+	rm -f \$PIDFILE
+	return \"\$RETVAL\"
+}
+
+do_systemd_start() {
+	exec \$DAEMON
+}
+
+case \"\$1\" in
+start|systemd-start)
+	log_daemon_msg \"Starting \$DESC\" \"\$NAME\"
+	do_start
+	case \$? in
+		0|1) log_end_msg 0 ; RET=\$? ;;
+		2)   log_end_msg 1 ; RET=\$? ;;
+		esac
+;;
+stop)
+	log_daemon_msg \"Stopping \$DESC\" \"\$NAME\"
+	do_stop
+	case \$? in
+		0|1) log_end_msg 0 ; RET=\$? ;;
+		2)   log_end_msg 1 ; RET=\$? ;;
+        esac
+;;
+restart|reload|force-reload)
+        \$0 stop
+        sleep 1
+        \$0 start
+;;
+*)
+        echo 'Usage: \$0 {start|stop|restart|reload}'
+        exit 1
+;;
+esac
+
+exit 0
+" >config/includes.chroot/etc/init.d/oci-agent-daemon
+chmod +x config/includes.chroot/etc/init.d/oci-agent-daemon
+
+mkdir -p /usr/bin
+echo "#!/bin/sh
+
+set -e
+
+# Contact PXE server once, anytime, during this interval
+INTERVAL=30
+while [ 1 ] ; do
+	DELAY=\$((  \$(dd if=/dev/urandom bs=512 count=1 2>&1 | cksum | cut -d' ' -f1) % \${INTERVAL} ))
+	END_COMMAND=\$(( \${INTERVAL} - \${DELAY} ))
+	sleep \${DELAY}
+	/usr/bin/openstack-cluster-installer-agent
+	sleep \${END_COMMAND}
+done
+
+" >config/includes.chroot/usr/bin/oci-agent-daemon
+chmod +x config/includes.chroot/usr/bin/oci-agent-daemon
+
+echo "#!/bin/sh
+
+set -e
+
+PXE_SERVER_IP=\$(cat /etc/oci/pxe-server-ip)
+
+curl http://\${PXE_SERVER_IP}/oci/install-status.php?status=installing
+if ! build-openstack-debian-image \$@ --pre-reboot-hook /usr/bin/oci-install-pre-reboot-hook ; then
+	# TODO: Report this as failed OS install
+	curl http://\${PXE_SERVER_IP}/oci/install-status.php?status=live
+fi
+" >config/includes.chroot/usr/bin/oci-install-with-report
+chmod +x config/includes.chroot/usr/bin/oci-install-with-report
+
+cp /usr/bin/oci-dell-dhcp-nic-selection config/includes.chroot/usr/bin/
+
+echo "#!/bin/sh
+
+set -e
+
+PXE_SERVER_IP=\$(cat /etc/oci/pxe-server-ip)
+
+curl http://\${PXE_SERVER_IP}/oci/install-status.php?status=firstboot
+" >config/includes.chroot/usr/bin/oci-install-pre-reboot-hook
+chmod +x config/includes.chroot/usr/bin/oci-install-pre-reboot-hook
+
+cp /usr/bin/openstack-cluster-installer-bodi-hook-script config/includes.chroot/usr/bin
+
+mkdir -p config/includes.chroot/etc/network
+echo "auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet dhcp" >config/includes.chroot/etc/network/interfaces
+
+mkdir -p config/package-lists
+echo "bash-completion
+bc
+bind9-host
+curl
+dmidecode
+debootstrap
+dosfstools
+extlinux
+firmware-bnx2
+firmware-bnx2x
+ipcalc
+ipmitool
+iproute2
+joe
+jq
+kbd
+kpartx
+ladvd
+less
+lshw
+lvm2
+mbr
+mdadm
+most
+net-tools
+nmap
+ntp
+openssh-server
+openssh-client
+openstack-debian-images
+openstack-pkg-tools
+parted
+pciutils
+plymouth
+policykit-1
+qemu-utils
+screen
+syslinux-common
+tcpdump
+util-linux
+vim
+wget
+xfsprogs" > config/package-lists/openstack.list.chroot
+
+# Check if we need to install megacli in the Live environment
+pkgos_inifile get /etc/openstack-cluster-installer/openstack-cluster-installer.conf megacli live_image_install_megacli
+LIVE_IMAGE_INSTALL_MEGACLI=$RET
+if [ "${LIVE_IMAGE_INSTALL_MEGACLI}" = "yes" ] ; then
+	mkdir -p config/archives
+	echo "-----BEGIN PGP PUBLIC KEY BLOCK-----
+Version: GnuPG v1.4.12 (GNU/Linux)
+
+mQENBFHwGLoBCADGXHFostxbz4UzGFYtmox4pvyN1gMhq2KCuQ6f+FESa4HTd9L6
+XVhXWPCad3cdxBIls+41+AdZTWxWMu7DUdy8nMU1Ikfw6JeHcSx97G5BdxBVMjK4
+iMGfPdLfDgWf4BQ2h0dnTEWobt31WaqgNiNjNrKktqbymmF94pwYkwL53ydIA4zl
+8ZQRZooFigkS9WdoKjh30Pv/SWakILSLcSQFHK0dvSkeGd1NxT9dMNPAXXqLom4+
+7kCc0s04sS+0DwW16b0Hpb46mtsR9kzOnrE/Smj24uOGzNZen0oCc2Y7bfZlyaN+
+RlTkWEze7lemc4Byup/QWkhT0Er8F8uxexy5ABEBAAG0PEhXUmFpZCAoaHR0cDov
+L2h3cmFpZC5sZS12ZXJ0Lm5ldCkgPHJvb3RAaHdyYWlkLmxlLXZlcnQubmV0PokB
+OAQTAQIAIgUCUfAYugIbAwYLCQgHAwIGFQgCCQoLBBYCAwECHgECF4AACgkQYAUh
+DiOz07Rc4Af+N3dEZZHzLNVTjQ0+fCyeg8/flWOkR8DhP10cyoJhSHFTZRdXVshn
+kP4VmmUycVeURh76DmrIRe/9Oyca6aGXccRMqvq+HMgBPVwD5qNhcJPIuzqEvmlO
+6UIeW2ydil/v1pWu740fGntyFRQcsfqjReVPXw9K588F7MDMyL+31vLm6aorLSzR
+hvLhOmGisTs0wg2Oz9f4muauRy6cpQPw/Zi/P/F4WkQYscbHrSbhszj6OIg/vftR
+UbZ7QB26/+40B0ag4JzLpmj3scFxf/WdUl5LXazqhsbkurk7huV41BNKXi1+BS3c
+x6pFzWEHpiuG1j7U/nScGzEQpsMlUW9D+rkBDQRR8Bi6AQgAuhH1H0VLwcROI/5n
+9yTxSbTIZbyhUan3raAbit3pgo0zLagfUtp3vULVnm5ISqQcYFGLZoE1MUkmjGOL
+38W0lsIiZTaKOKXxBbLlPhhrvlXnNWAG/S1wnq7K+DV179KCTkUzaLRDbHvv999j
+9odBRtAkiTnCfHTMCN4AhydEejNxtlzJo4E5FecH4reimLI5euUdTltgCjixrbsa
+KbQftYpSMdXnLy2+00QZoXu0U/h4WZcMhOSEEiyGP9BY6m5G76n03HIeQ6eALDFu
+ryAgO+SB9rBrm/VN0kR/TZq0iA3uzLHC7zCw2aImipkr+rIuJOku0wH9MyowBbia
+bQtnCQARAQABiQEfBBgBAgAJBQJR8Bi6AhsMAAoJEGAFIQ4js9O0d5YH/3fNQgsC
+LvD0g2wdoksv5bG9CUOi9Bs0JHqI0LhXmPvMsbDojZ+zZle7KWNfK2227mWhmoG1
+WLujJSmTtxhEO1fXIdYjlDfk2uLJKuFi2wQX9n8dFDUmKY3CUJgeVZof1uQ/5C3D
+O06CcuOtf2d/+iijuW112aV1q1hoQqw71ojTET0iIV6lD/0i1eEBSSe1Ohb9yTGR
+VxTVrB78zU9hih4/Oq8wJT/Fv25aO1MDSc26CXAg0JA6IWvKal3BSPNhtz4L4FIg
+lXleArf9oJqxDO3TsV5zcLyxsIuRuxyP0+AKdSQUqv0dFi4Jf79OmvOmgwydhHjY
++f7quLbwiiDmPbU=
+=Yv6D
+-----END PGP PUBLIC KEY BLOCK-----" >config/archives/megacli.key.chroot
+	pkgos_inifile get /etc/openstack-cluster-installer/openstack-cluster-installer.conf megacli megacli_repo
+	MEGACLI_REPO=$RET
+	echo "deb ${MEGACLI_REPO} ${debian_release} main" >config/archives/megacli.list.chroot
+	echo "megaraid-status
+megactl
+megamgr
+dellmgr
+megaclisas-status
+megacli
+smartmontools" >config/package-lists/megacli.list.chroot
+	pkgos_inifile get /etc/openstack-cluster-installer/openstack-cluster-installer.conf megacli target_install_megacli
+	MEGACLI_IN_TARGET=${RET}
+	if [ "${MEGACLI_IN_TARGET}" ] ; then
+		echo "yes" >config/includes.chroot/etc/oci-setup-megacli-intarget
+		cp config/archives/megacli.key.chroot config/includes.chroot/etc/oci-setup-megacli-intarget-key
+		echo "deb ${MEGACLI_REPO} ${debian_release} main" >config/includes.chroot/etc/oci-setup-megacli-intarget-repo
+	fi
+fi
+
+# Check if we should install Dell's iDRAC tools (ie: rackadm)
+pkgos_inifile get /etc/openstack-cluster-installer/openstack-cluster-installer.conf dellipmi live_image_install_dell_ipmi
+LIVE_IMAGE_INSTALL_DELL_IPMI=$RET
+if [ "${LIVE_IMAGE_INSTALL_DELL_IPMI}" = "yes" ] ; then
+	pkgos_inifile get /etc/openstack-cluster-installer/openstack-cluster-installer.conf dellipmi dell_ipmi_repo
+	DELL_IPMI_REPO=$RET
+	if [ -n "${DELL_IPMI_REPO}" ] ; then
+		echo "-----BEGIN PGP PUBLIC KEY BLOCK-----
+
+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
+ZFe5xHRWSlrC3WTbzg==
+=buqa
+-----END PGP PUBLIC KEY BLOCK-----
+" >config/archives/dell-ipmi.key.chroot
+		echo "deb ${DELL_IPMI_REPO} stretch main" >config/archives/dell-ipmi.list.chroot
+		mkdir -p config/includes.chroot/opt/dell/srvadmin/lib/openmanage
+		touch config/includes.chroot/opt/dell/srvadmin/lib/openmanage/IGNORE_GENERATION
+		echo "dirmngr
+iproute2
+libopenipmi0" > config/package-lists/dell-ipmi.list.chroot
+
+		# Add modules to be loaded at boot time
+		echo "ipmi_msghandler
+ipmi_devintf
+ipmi_si
+srvadmin-deng
+srvadmin-isvc" >config/includes.chroot/etc/modules
+
+		# Create .ipc directories (to enable LCD, BMC communication)
+		mkdir -p config/includes.chroot/opt/dell/srvadmin/shared/.ipc
+		mkdir -p config/includes.chroot/opt/dell/srvadmin/hapi/bin/.ipc
+
+		# make_omreg_dot_cfg
+		mkdir -p config/includes.chroot/opt/dell/srvadmin/etc
+		echo "suptlib.installpath=/opt/dell/srvadmin/
+suptlib.logpath=/opt/dell/srvadmin/var/log/openmanage
+suptlib.vardatapath=/opt/dell/srvadmin/var/lib/openmanage
+suptlib.inipath=/opt/dell/srvadmin/etc/srvadmin-deng
+
+OMDataEngine.omilcore.version=8.4.0
+OMDataEngine.configtool=/opt/dell/srvadmin/sbin/dcecfg
+OMDataEngine.installpath=/opt/dell/srvadmin/
+OMDataEngine.logpath=/opt/dell/srvadmin/var/log/openmanage
+OMDataEngine.vardatapath=/opt/dell/srvadmin/var/lib/openmanage
+OMDataEngine.inipath=/opt/dell/srvadmin/etc/srvadmin-deng
+OMDataEngine.startsnmpd=true
+
+hapi.omilcore.version=8.4.0
+hapi.configtool=/opt/dell/srvadmin/sbin/dchcfg
+hapi.installpath=/opt/dell/srvadmin/
+hapi.logpath=/opt/dell/srvadmin/var/log/openmanage
+hapi.vardatapath=/opt/dell/srvadmin/var/lib/openmanage
+hapi.inipath=/opt/dell/srvadmin/etc/srvadmin-hapi
+
+openmanage.openipmi.kernel.2.6.x.ver_min_major=33
+openmanage.openipmi.kernel.2.6.x.ver_min_minor=13
+openmanage.openipmi.kernel.ver_min_major=2
+openmanage.openipmi.kernel.ver_min_minor=6
+openmanage.openipmi.kernel.ver_min_patch=15
+openmanage.openipmi.rhel3.ver_min_major=35
+openmanage.openipmi.rhel3.ver_min_minor=13
+openmanage.openipmi.rhel4.ver_min_major=33
+openmanage.openipmi.rhel4.ver_min_minor=13
+
+
+Instrumentation.omilcore.version=8.4.0
+Instrumentation.configtool=/opt/dell/srvadmin/sbin/dcicfg
+Instrumentation.installpath=/opt/dell/srvadmin/
+Instrumentation.logpath=/opt/dell/srvadmin/var/lib/openmanage
+Instrumentation.vardatapath=/opt/dell/srvadmin/var/log/openmanage
+Instrumentation.inipath=/opt/dell/srvadmin/etc/srvadmin-isvc
+openmanage.version=8.4.0
+openmanage.release=1
+openmanage.archtype=64
+openmanage.omilcore.installpath=/opt/dell/srvadmin
+openmanage.omilcore.omiverdbpath=/opt/dell/srvadmin/var/lib/srvadmin-omilcore/
+openmanage.funcs=/opt/dell/srvadmin/lib64/srvadmin-omilcore/Funcs.sh
+openmanage.syslistfile=/opt/dell/srvadmin/share/srvadmin-omilcore/syslist.txt
+openmanage.8gsyslistfile=/opt/dell/srvadmin/share/srvadmin-omilcore/8gsyslist.txt
+openmanage.9gsyslistfile=/opt/dell/srvadmin/share/srvadmin-omilcore/9gsyslist.txt
+openmanage.idracsyslistfile=/opt/dell/srvadmin/share/srvadmin-omilcore/idracsyslist.txt
+openmanage.openipmi.syslisttypesfile=/opt/dell/srvadmin/share/srvadmin-omilcore/syslisttypes.txt
+rac5.inipath=/opt/dell/srvadmin/etc/srvadmin-isvc
+" >config/includes.chroot/opt/dell/srvadmin/etc/omreg.cfg
+		# Add Dell library path to ld config
+		echo "/opt/dell/toolkit/lib" >config/includes.chroot/etc/ld.so.conf
+		echo "yes" >config/includes.chroot/etc/oci-setup-dell-ipmi-intarget
+		echo "${dell_ipmi_repo}" >config/includes.chroot/etc/oci-setup-dell-ipmi-intarget-repo
+		# This, for a reason, fails... :(
+		mkdir -p config/includes.chroot/etc/apt/sources.list.d
+		echo "
+echo 'deb '\$(cat /etc/oci-setup-dell-ipmi-intarget-repo)' stretch main' >/etc/apt/sources.list.d/dell-ipmi.list
+apt-get update
+apt-get install -y srvadmin-idracadm8" >>config/includes.chroot/etc/rc.local
+	fi
+fi
+
+# Add serial console
+mkdir -p config/includes.chroot/etc/systemd/system/getty.target.wants
+echo "#  SPDX-License-Identifier: LGPL-2.1+
+#
+#  This file is part of systemd.
+#
+#  systemd is free software; you can redistribute it and/or modify it
+#  under the terms of the GNU Lesser General Public License as published by
+#  the Free Software Foundation; either version 2.1 of the License, or
+#  (at your option) any later version.
+
+[Unit]
+Description=Serial Getty on %I
+Documentation=man:agetty(8) man:systemd-getty-generator(8)
+Documentation=http://0pointer.de/blog/projects/serial-console.html
+BindsTo=dev-%i.device
+After=dev-%i.device systemd-user-sessions.service plymouth-quit-wait.service getty-pre.target
+After=rc-local.service
+
+# If additional gettys are spawned during boot then we should make
+# sure that this is synchronized before getty.target, even though
+# getty.target didn't actually pull it in.
+Before=getty.target
+IgnoreOnIsolate=yes
+
+# IgnoreOnIsolate causes issues with sulogin, if someone isolates
+# rescue.target or starts rescue.service from multi-user.target or
+# graphical.target.
+Conflicts=rescue.service
+Before=rescue.service
+
+[Service]
+# The '-o' option value tells agetty to replace 'login' arguments with an
+# option to preserve environment (-p), followed by '--' for safety, and then
+# the entered username.
+ExecStart=-/sbin/agetty --autologin root --keep-baud 9600 %I \$TERM
+Type=idle
+Restart=always
+UtmpIdentifier=%I
+TTYPath=/dev/%I
+TTYReset=yes
+TTYVHangup=yes
+KillMode=process
+IgnoreSIGPIPE=no
+SendSIGHUP=yes
+
+[Install]
+WantedBy=getty.target
+" >config/includes.chroot/etc/systemd/system/serial-getty@ttyS1.service
+ln -s ../serial-getty@ttyS1.service config/includes.chroot/etc/systemd/system/getty.target.wants/serial-getty@ttyS1.service
+
+cp -auxf /usr/share/live/build/bootloaders config
+	
+lb clean
+lb config --mirror-binary http://${OTCI_PXE_SERVER_IP}:9999/debian -b netboot --bootappend-live "boot=live iomem=relaxed console=tty0 console=ttyS1,115200 earlyprintk=ttyS1,115200 consoleblank=0 systemd.show_status=true biosdevname=0 net.ifnames=0 components url=http://${OTCI_PXE_SERVER_IP} fetch=http://${OTCI_PXE_SERVER_IP}/openstack-cluster-installer/filesystem.squashfs" --net-root-path /var/lib/openstack-cluster-installer --net-root-server ${OTCI_PXE_SERVER_IP}
+
+# Change the default mirror in the config
+if [ -n "${OTCI_DEB_MIRROR_ADDR}" ] ; then
+	for i in LB_PARENT_MIRROR_BOOTSTRAP LB_PARENT_MIRROR_CHROOT LB_PARENT_MIRROR_DEBIAN_INSTALLER LB_MIRROR_BOOTSTRAP LB_MIRROR_CHROOT LB_MIRROR_DEBIAN_INSTALLER \
+		LB_PARENT_MIRROR_BINARY LB_MIRROR_BINARY ; do
+		sed -i 's|^'${i}'=.*|'${i}'="'${OTCI_DEB_MIRROR_ADDR}'"|' config/bootstrap
+	done
+fi
+
+# Change the default security mirror in the config
+if [ -n "${OTCI_DEB_SECURITY_MIRROR_ADDR}" ] ; then
+	for i in LB_PARENT_MIRROR_CHROOT_SECURITY LB_PARENT_MIRROR_BINARY_SECURITY LB_MIRROR_CHROOT_SECURITY LB_MIRROR_BINARY_SECURITY ; do
+		sed -i 's|^'${i}'=.*|'${i}'="'${OTCI_DEB_SECURITY_MIRROR_ADDR}'"|' config/bootstrap
+	done
+fi
+
+sed -i 's/^LB_BOOTLOADERS=.*/LB_BOOTLOADERS="syslinux"/' config/binary
+
+# Fix the default syslinux timeout to 10 seconds
+sed -i "s/timeout 0/timeout 10/" config/bootloaders/isolinux/isolinux.cfg
+sed -i "s/timeout 0/timeout 10/" config/bootloaders/pxelinux/pxelinux.cfg/default
+sed -i "s/timeout 0/timeout 10/" config/bootloaders/syslinux/syslinux.cfg
+sed -i "s/timeout 0/timeout 10/" config/bootloaders/extlinux/extlinux.conf
+
+sed -i s/ftp.debian.org/${OTCI_PXE_SERVER_IP}:9999/ config/bootstrap
+
+# Customize the distribution name
+sed -i "s#LB_DEBIAN_INSTALLER_DISTRIBUTION=.*#LB_DEBIAN_INSTALLER_DISTRIBUTION=\"${debian_release}\"#" config/binary
+sed -i "s#LB_ISO_VOLUME=.*#LB_ISO_VOLUME=\"Debian ${debian_release} \$(date +%Y%m%d-%H:%M)\"#" config/binary
+sed -i "s#Distribution: .*#Distribution: ${debian_release}#" config/build
+sed -i "s#LB_DISTRIBUTION=.*#LB_DISTRIBUTION=\"${debian_release}\"#" config/bootstrap
+sed -i "s#LB_PARENT_DISTRIBUTION=.*#LB_PARENT_DISTRIBUTION=\"${debian_release}\"#" config/bootstrap
+sed -i "s#LB_PARENT_DEBIAN_INSTALLER_DISTRIBUTION=.*#LB_PARENT_DEBIAN_INSTALLER_DISTRIBUTION=\"${debian_release}\"#" config/bootstrap
+
+# Disable security and updates if using Sid
+if [ "${debian_release}" = "sid" ] ; then
+	sed -i "s#LB_SECURITY=.*#LB_SECURITY=\"false\"#" config/chroot
+	sed -i "s#LB_UPDATES=.*#LB_UPDATES=\"false\"#" config/chroot
+fi
+
+lb build
+
+# Copy the tftp stuff
+mkdir -p /var/lib/openstack-cluster-installer/tftp
+cp -r tftpboot/* /var/lib/openstack-cluster-installer/tftp
+mkdir -p /var/lib/openstack-cluster-installer/tftp/live
+cp -auxf tftpboot/live/vmlinuz* tftpboot/live/initrd* /var/lib/openstack-cluster-installer/tftp/live
+cp binary/live/filesystem.squashfs /var/lib/openstack-cluster-installer
+
+# Copy it also to the web path, so it works over iPXE
+mkdir -p /usr/share/openstack-cluster-installer/live
+cp -auxf tftpboot/live/vmlinuz* tftpboot/live/initrd* /usr/share/openstack-cluster-installer/live
+
+# Create the ipxe-boot-script, needed for ipxe support.
+echo "#!ipxe
+
+chain tftp://${OTCI_PXE_SERVER_IP}/lpxelinux.0
+" > /var/lib/openstack-cluster-installer/tftp/ipxe-boot-script
+
+cp /usr/lib/PXELINUX/lpxelinux.0 /var/lib/openstack-cluster-installer/tftp
+
+# Hack the initrd file to remove drivers
+if [ "${remove_drivers_from_initrd}" = "yes" ] ; then
+	TMPDIR=$(mktemp --directory)
+	INITRD_PATH=/var/lib/openstack-cluster-installer/tftp/live/initrd.img
+	MYCWD=$(pwd)
+
+	cd ${TMPDIR}
+	# Uncompress the initrd
+	zcat ${INITRD_PATH} | cpio -idmv
+	for i in ${remove_drivers_from_initrd_list} ; do
+		rm lib/modules/*/kernel/drivers/net/ethernet/${i}
+	done
+	find . | cpio --create --format='newc' | gzip -9 >${INITRD_PATH}
+	rm -rf ${TMPDIR}
+	cd ${MYCWD}
+fi

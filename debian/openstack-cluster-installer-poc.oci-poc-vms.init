@@ -1,0 +1,257 @@
+#!/bin/sh
+
+### BEGIN INIT INFO
+# Provides:          oci-poc-vms
+# Required-Start:    $network $local_fs
+# Required-Stop:     $network $local_fs
+# Should-Start:      oci-poc-virtual-network
+# Should-Stop:       oci-poc-virtual-network
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: A small script to start the OCI VMs.
+# Description:       A small script to start the OCI VMs.
+### END INIT INFO
+
+. /lib/lsb/init-functions
+
+set -x
+
+TMPL_DIR=/var/lib/openstack-cluster-installer-poc/templates
+RUNT_DIR=/var/lib/openstack-cluster-installer-poc/runtime
+PID_DIR=/var/run/oci-poc
+[ -d $PID_DIR ] || mkdir ${PID_DIR}
+
+DESC="OCI PoC VMs startup"
+NAME="oci-poc-vms"
+
+if ! [ -r /etc/oci-poc/oci-poc.conf ] ; then
+	echo "Cannot find /etc/oci-poc/oci-poc.conf"
+	exit 1
+fi
+. /etc/oci-poc/oci-poc.conf
+
+if ! [ -r ${TMPL_DIR}/pxe-server-node.qcow2 ] ; then
+	echo "Please create the OCI PXE server template by running: oci-poc-setup";
+fi
+
+GUEST_NUMBER_LIST=$(seq -s ' ' 1 ${NUMBER_OF_GUESTS})
+
+start_one_vm () {
+	if [ "${1}" = "--second-hdd" ] ; then
+		QCOW2_PATH=${2}
+		SECOND_DRIVE="-drive if=virtio,file=${QCOW2_PATH},index=1,media=disk,format=qcow2"
+		shift
+		shift
+	else
+		QCOW2_PATH=""
+		SECOND_DRIVE=""
+	fi
+
+	if [ "${1}" = "--third-hdd" ] ; then
+		QCOW3_PATH=${2}
+		THIRD_DRIVE="-drive if=virtio,file=${QCOW3_PATH},index=2,media=disk,format=qcow2"
+		shift
+		shift
+	else
+		QCOW3_PATH=""
+		THIRD_DRIVE=""
+	fi
+
+	QCOW_PATH=${1}
+	VM_PID_FILE=${2}
+	VNC_PORT=${3}
+	BOOT_DEV=${4}
+	MAC_END=${5}
+	TAP_IFNAME_END=${6}
+	HOSTNAME=${7}
+	RAM=${8}
+
+	GUEST_IPMI_CHART_PORT=$(( ${VNC_PORT} + 9100 ))
+	HOST_IPMI_PORT=$(( ${VNC_PORT} + 9000 ))
+
+	mkdir -p /var/lib/openstack-cluster-installer-poc/ipmi_sim
+
+	if [ "${HOSTNAME}" = "pxe-server-node" ] ; then
+		BOOT="c"
+	else
+		BOOT="n"
+	fi
+
+	MONITOR_PORT=$(( 55000 + ${VNC_PORT}))
+
+	echo "name \"ipmisim1\"
+set_working_mc 0x20
+  startlan 1
+    addr 0.0.0.0 ${HOST_IPMI_PORT}
+    priv_limit admin
+    allowed_auths_callback none md2 md5 straight
+    allowed_auths_user none md2 md5 straight
+    allowed_auths_operator none md2 md5 straight
+    allowed_auths_admin none md2 md5 straight
+    guid a123456789abcdefa123456789abcdef
+  endlan
+  serial 15 localhost ${GUEST_IPMI_CHART_PORT} codec VM
+  startcmd \"qemu-system-x86_64 -enable-kvm -m size=${RAM}G -smp cpus=4 -cpu host,+vmx,+spec-ctrl -vnc :${VNC_PORT} -monitor tcp:127.0.0.1:${MONITOR_PORT},server,nowait -pidfile ${VM_PID_FILE} -daemonize -drive if=virtio,file=${QCOW_PATH},index=0,media=disk,format=qcow2 ${SECOND_DRIVE} ${THIRD_DRIVE} -boot ${BOOT} -device e1000,netdev=net0,mac=${GUEST_MAC_ADDRESS_PREFIX_ETH0}${MAC_END} -netdev tap,id=net0,ifname=${GUEST_TAPIF_PREFIX}${TAP_IFNAME_END}eth0 -device e1000,netdev=net1,mac=${GUEST_MAC_ADDRESS_PREFIX_ETH1}${MAC_END} -netdev tap,id=net1,ifname=${GUEST_TAPIF_PREFIX}${TAP_IFNAME_END}eth1 -device e1000,netdev=net2,mac=${GUEST_MAC_ADDRESS_PREFIX_ETH2}${MAC_END} -netdev tap,id=net2,ifname=${GUEST_TAPIF_PREFIX}${TAP_IFNAME_END}eth2 -device e1000,netdev=net3,mac=${GUEST_MAC_ADDRESS_PREFIX_ETH3}${MAC_END} -netdev tap,id=net3,ifname=${GUEST_TAPIF_PREFIX}${TAP_IFNAME_END}eth3 -smbios type=1,manufacturer=LinuxKVM,product=qemu-oci,serial=${MAC_END} -smbios type=3,manufacturer=LinuxKVM,serial=${MAC_END} -chardev socket,id=ipmi0,host=localhost,port=${GUEST_IPMI_CHART_PORT},reconnect=10 -device ipmi-bmc-extern,chardev=ipmi0,id=bmc0 -device isa-ipmi-kcs,bmc=bmc0,irq=5\"
+  startnow true
+  user 1 true  \"\"        \"test\" user     10       none md2 md5 straight
+  user 2 true  \"ipmiusr\" \"test\" admin    10       none md2 md5 straight
+" >/var/lib/openstack-cluster-installer-poc/ipmi_sim/${HOSTNAME}.conf
+
+
+	start-stop-daemon \
+		--start \
+		--quiet \
+		--background \
+		--pidfile ${VM_PID_FILE}.ipmisim.pid \
+		--make-pidfile \
+		--startas /usr/bin/ipmi_sim \
+		-- 	-n \
+			-c /var/lib/openstack-cluster-installer-poc/ipmi_sim/${HOSTNAME}.conf \
+			-f /etc/oci-poc/ipmisim1.emu \
+		|| return 2
+}
+
+wait_for_ssh () {
+	local COUNT CYCLES OTCI_CAN_SSH SSH_HOST
+	COUNT=120
+	CYCLES=0
+	OTCI_CAN_SSH=no
+	SSH_HOST=${1}
+	while [ "${OTCI_CAN_SSH}" != "yes" ] && [ ${COUNT} != 0 ] ; do
+		if ssh -o "StrictHostKeyChecking no" -o "ConnectTimeout 2" ${SSH_HOST} 'echo -n ""' ; then
+			OTCI_CAN_SSH=yes
+		else
+			COUNT=$(( ${COUNT} - 1 ))
+			CYCLES=$(( ${CYCLES} + 1 ))
+			sleep 1
+		fi
+	done
+	ssh-keygen -f ~/.ssh/known_hosts -R ${SSH_HOST} || true
+	ssh -o "StrictHostKeyChecking no" -o "ConnectTimeout 2" ${SSH_HOST} 'echo -n ""'
+}
+
+otci_remote () {
+	if [ "${1}" = "--host" ] ; then
+		MYHOST=${2}
+		shift
+		shift
+	else
+		MYHOST=192.168.100.2
+	fi
+	ssh -o "StrictHostKeyChecking no" ${MYHOST} $@
+}
+
+configure_db_and_web_access () {
+	PASSWORD=$(openssl rand -hex 16)
+	otci_remote --host ${OCI_VM_IP} a2ensite openstack-cluster-installer.conf
+	otci_remote --host ${OCI_VM_IP} systemctl reload apache2
+	otci_remote --host ${OCI_VM_IP} ". /usr/share/openstack-pkg-tools/pkgos_func ; pkgos_inifile set /etc/openstack-cluster-installer/openstack-cluster-installer.conf database connection mysql+pymysql://oci:${PASSWORD}@localhost:3306/oci"
+	otci_remote --host ${OCI_VM_IP} "mysql --execute 'CREATE DATABASE oci;'"
+	otci_remote --host ${OCI_VM_IP} "mysql --execute \"GRANT ALL PRIVILEGES ON oci.* TO 'oci'@'localhost' IDENTIFIED BY '${PASSWORD}';\""
+	otci_remote --host ${OCI_VM_IP} "apt-get install -y php-cli"
+	otci_remote --host ${OCI_VM_IP} "cd /usr/share/openstack-cluster-installer ; php db_sync.php"
+	otci_remote --host ${OCI_VM_IP} "chown www-data /etc/openstack-cluster-installer"
+	otci_remote --host ${OCI_VM_IP} "chown www-data /etc/openstack-cluster-installer/openstack-cluster-installer.conf"
+	otci_remote --host ${OCI_VM_IP} "cp -auxf /var/lib/openstack-cluster-installer/tftp/* /usr/share/openstack-cluster-installer"
+	otci_remote --host ${OCI_VM_IP} "oci-root-ca-gen"
+	otci_remote --host ${OCI_VM_IP} "oci-userdb -a poc poc"
+	otci_remote --host ${OCI_VM_IP} "sed -i 's#connection = #connection=#' /etc/openstack-cluster-installer/openstack-cluster-installer.conf"
+}
+
+start_vms () {
+	# Copy all images from template folder
+	cp ${TMPL_DIR}/pxe-server-node.qcow2 ${RUNT_DIR}/pxe-server-node.qcow2
+	for i in ${GUEST_NUMBER_LIST} ; do
+		cp ${TMPL_DIR}/slave-image.qcow2 ${RUNT_DIR}/slave-node-${i}-vda.qcow2
+		cp ${TMPL_DIR}/slave-image.qcow2 ${RUNT_DIR}/slave-node-${i}-vdb.qcow2
+		if [ ${i} -gt 6 ] ; then
+			cp ${TMPL_DIR}/slave-image.qcow2 ${RUNT_DIR}/slave-node-${i}-vdc.qcow2
+		fi
+	done
+
+	# Start the PXE / puppet-master node
+	start_one_vm ${RUNT_DIR}/pxe-server-node.qcow2 ${PID_DIR}/pxe-server-node.pid 1 c C0 0 pxe-server-node 4
+	sleep 5
+	wait_for_ssh ${OCI_VM_IP}
+	configure_db_and_web_access
+
+	# Start all the slave nodes
+	for i in ${GUEST_NUMBER_LIST} ; do
+		MAC_END=$(printf "%X\n" $((0xC0 + ${i})))
+		if [ ${i} -gt 6 ] ; then
+			if [ ${i} -gt 15 ] ; then
+				start_one_vm --second-hdd ${RUNT_DIR}/slave-node-${i}-vdb.qcow2 --third-hdd ${RUNT_DIR}/slave-node-${i}-vdc.qcow2 ${RUNT_DIR}/slave-node-${i}-vda.qcow2 ${PID_DIR}/slave-node-${i}.pid $(($i + 1)) n ${MAC_END} ${i} slave-node-${i} 20
+			else
+				start_one_vm --second-hdd ${RUNT_DIR}/slave-node-${i}-vdb.qcow2 --third-hdd ${RUNT_DIR}/slave-node-${i}-vdc.qcow2 ${RUNT_DIR}/slave-node-${i}-vda.qcow2 ${PID_DIR}/slave-node-${i}.pid $(($i + 1)) n ${MAC_END} ${i} slave-node-${i} 7
+			fi
+		else
+			if [ ${i} -gt 3 ] ; then
+				start_one_vm --second-hdd ${RUNT_DIR}/slave-node-${i}-vdb.qcow2 ${RUNT_DIR}/slave-node-${i}-vda.qcow2 ${PID_DIR}/slave-node-${i}.pid $(($i + 1)) n ${MAC_END} ${i} slave-node-${i} 5
+			else
+				start_one_vm ${RUNT_DIR}/slave-node-${i}-vda.qcow2 ${PID_DIR}/slave-node-${i}.pid $(($i + 1)) n ${MAC_END} ${i} slave-node-${i} 16
+			fi
+		fi
+		sleep 2
+	done
+}
+
+stop_one_vm () {
+	VM_PID_FILE=${1}
+
+	start-stop-daemon \
+		--stop \
+		--quiet \
+		--retry=TERM/30/KILL/5 \
+		--remove-pidfile \
+		--pidfile $VM_PID_FILE
+	start-stop-daemon \
+		--stop \
+		--quiet \
+		--retry=TERM/30/KILL/5 \
+		--remove-pidfile \
+		--pidfile ${VM_PID_FILE}.ipmisim.pid
+        RETVAL=$?
+        rm -f $PIDFILE
+        return "$RETVAL"
+}
+
+stop_vms () {
+	stop_one_vm ${PID_DIR}/pxe-server-node.pid
+	for i in ${GUEST_NUMBER_LIST} ; do
+		stop_one_vm ${PID_DIR}/slave-node-${i}.pid
+	done
+}
+
+case "${1}" in
+manual-start)
+	start_vms
+;;
+manual-stop)
+	stop_vms
+;;
+start)
+	log_daemon_msg "Starting $DESC" "$NAME"
+        start_vms
+        case $? in
+        	0|1) log_end_msg 0 ; RET=$? ;;
+        	2)   log_end_msg 1 ; RET=$? ;;
+        esac
+;;
+stop)
+	log_daemon_msg "Stopping $DESC" "$NAME"
+	stop_vms
+	case $? in
+		0|1) log_end_msg 0 ; RET=$? ;;
+		2)   log_end_msg 1 ; RET=$? ;;
+	esac
+;;
+force-reload)
+	$0 stop
+	sleep 1
+	$0 start
+;;
+*)
+	echo "Usage: $0 {start|stop|restart|reload}"
+	exit 1
+;;
+esac

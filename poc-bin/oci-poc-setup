@@ -1,0 +1,49 @@
+#!/bin/sh
+
+set -e
+set -x
+
+if ! [ -r /etc/oci-poc/oci-poc.conf ] ; then
+	echo "Cannot read /etc/oci-poc/oci-poc.conf"
+fi
+. /etc/oci-poc/oci-poc.conf
+
+MYDIR=$(pwd)
+cd /var/lib/openstack-cluster-installer-poc/templates
+
+if [ -r /root/.ssh/authorized_keys ] ; then
+	ROOT_SSH_KEY_PARAM="--root-ssh-key /root/.ssh/authorized_keys"
+else
+	echo "Could not read /root/.ssh/authorized_keys, please make one."
+	exit 1
+fi
+
+# Build a full Debian OS with our ssh key in it
+build-openstack-debian-image \
+	--release ${debian_release} \
+	--output pxe-server-node \
+	--boot-manager grub \
+	--debootstrap-url ${DEBIAN_MIRROR} \
+	--sources.list-mirror ${DEBIAN_MIRROR} \
+	--image-size 10 \
+	--extra-packages gnupg2,joe \
+	--password ${OCI_VM_ROOT_PASS} \
+	--no-cloud-init \
+	${ROOT_SSH_KEY_PARAM} \
+	--no-remove-host-keys \
+	--permit-ssh-as-root \
+	--hostname ${OCI_VM_FQDN} \
+	--static-iface type=normal,iface0=eth0,addr=${OCI_VM_IP}/24:${HOST_NETWORK_PREFIX}.1 \
+	--security-mirror ${DEBIAN_SECURITY_MIRROR} \
+	--hook-script /usr/bin/oci-poc-setup-bodi-hook \
+	--no-cloud-kernel
+
+# Create an empty 10GB HDD
+qemu-img create slave-image.raw 60G
+qemu-img convert -c -f raw slave-image.raw -o compat=0.10 -O qcow2 slave-image.qcow2
+rm slave-image.raw
+
+update-rc.d oci-poc-vms defaults
+
+cd ${MYDIR}
+

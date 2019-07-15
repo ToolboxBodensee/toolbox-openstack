@@ -1,0 +1,12 @@
+#!/bin/sh
+
+set -e
+
+if [ "${1}" = "configure" ] || [ "${1}" = "reconfigure" ] ; then
+	mkdir -p /var/lib/openstack-cluster-installer-poc/templates
+	mkdir -p /var/lib/openstack-cluster-installer-poc/runtime
+fi
+
+#DEBHELPER#
+
+exit 0

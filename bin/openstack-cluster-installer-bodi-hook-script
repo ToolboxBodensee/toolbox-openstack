@@ -1,0 +1,622 @@
+#!/bin/sh
+
+set -e
+set -x
+
+if ! [ -r /usr/share/openstack-pkg-tools/pkgos_func ] ; then
+	echo "Could not read /usr/share/openstack-pkg-tools/pkgos_func."
+	exit 1
+fi
+. /usr/share/openstack-pkg-tools/pkgos_func
+
+openstack_release=$(cat /etc/oci_openstack_release)
+debian_release=$(cat /etc/oci_debian_release)
+use_debian_dot_net_backport=$(cat /etc/oci_use_debian_dot_net_backport)
+install_buildd_incoming=$(cat /etc/oci_use_incoming_build)
+debian_incoming_buildd=$(cat /etc/oci_incoming_buildd_url)
+install_ceph_upstream_repo=$(cat /etc/oci_install_ceph_upstream_repo)
+debian_mirror_ceph=$(cat /etc/oci_debian_mirror_ceph)
+
+# This script writes rc.local in the HDD of installed OS
+# so that it can inform the PXE server that the OS is up.
+
+mkdir -p ${BODI_CHROOT_PATH}/etc/oci
+cp /etc/oci/pxe-server-ip ${BODI_CHROOT_PATH}/etc/oci/pxe-server-ip
+
+echo "#!/bin/sh
+
+set -e
+
+# Wait for network to be up, otherwise it goes too fast...
+echo 'Waiting 10 seconds to wait for network to settle-up'
+sleep 10
+
+PXE_SERVER_IP=\$(cat /etc/oci/pxe-server-ip)
+CHASSIS_SERIAL=\$(dmidecode -s chassis-serial-number)
+SYSTEM_SERIAL=\$(dmidecode -s system-serial-number)
+
+DEFROUTE_IF=\$(awk '{ if ( \$2 == \"00000000\" ) print \$1 }' /proc/net/route)
+if [ -n \"\${DEFROUTE_IF}\" ] ; then
+	if [ -x /bin/ip ] ; then
+		DEFROUTE_IP=\$(LC_ALL=C ip addr show \"\${DEFROUTE_IF}\" | grep inet | head -n 1 | awk '{print \$2}' | cut -d/ -f1 | grep -E '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\$')
+	else
+		DEFROUTE_IP=\$(hostname -i | grep -E '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\$')
+	fi
+fi
+if [ -n \"\${DEFROUTE_IP}\" ] ; then
+	IP_PARAM=\"&ipaddr=\${DEFROUTE_IP}\"
+else
+	IP_PARAM=\"\"
+fi
+
+curl \"http://\${PXE_SERVER_IP}/oci/install-status.php?status=installed&chassis-serial=\${SYSTEM_SERIAL}\${IP_PARAM}\"
+
+" >${BODI_CHROOT_PATH}/usr/bin/oci-report-status
+chmod +x ${BODI_CHROOT_PATH}/usr/bin/oci-report-status
+
+echo "#!/bin/sh
+
+PXE_SERVER_IP=\$(cat /etc/oci/pxe-server-ip)
+SYSTEM_SERIAL=\$(dmidecode -s system-serial-number)
+
+curl \"http://\${PXE_SERVER_IP}/oci/install-status.php?status=puppet-running&chassis-serial=\${SYSTEM_SERIAL}\"
+
+" >${BODI_CHROOT_PATH}/usr/bin/oci-report-puppet-running
+chmod +x ${BODI_CHROOT_PATH}/usr/bin/oci-report-puppet-running
+
+echo "#!/bin/sh
+
+PXE_SERVER_IP=\$(cat /etc/oci/pxe-server-ip)
+SYSTEM_SERIAL=\$(dmidecode -s system-serial-number)
+
+curl \"http://\${PXE_SERVER_IP}/oci/install-status.php?status=puppet-success&chassis-serial=\${SYSTEM_SERIAL}\"
+
+" >${BODI_CHROOT_PATH}/usr/bin/oci-report-puppet-success
+chmod +x ${BODI_CHROOT_PATH}/usr/bin/oci-report-puppet-success
+
+echo "#!/bin/sh
+
+PXE_SERVER_IP=\$(cat /etc/oci/pxe-server-ip)
+SYSTEM_SERIAL=\$(dmidecode -s system-serial-number)
+
+curl \"http://\${PXE_SERVER_IP}/oci/install-status.php?status=puppet-failure&chassis-serial=\${SYSTEM_SERIAL}\"
+
+" >${BODI_CHROOT_PATH}/usr/bin/oci-report-puppet-failure
+chmod +x ${BODI_CHROOT_PATH}/usr/bin/oci-report-puppet-failure
+
+
+# If we see an already prepared hosts file, copy it to the chroot
+if [ -e /oci-hosts-file ] ; then
+	cat /oci-hosts-file >${BODI_CHROOT_PATH}/etc/hosts
+fi
+
+if [ -r /puppet-master-host ] ; then
+	MY_HOSTNAME=$(cat /puppet-master-host)
+else
+	MY_HOSTNAME=$(hostname --fqdn)
+fi
+
+# Configure the puppet agent to talk to the puppet master
+if [ -e ${BODI_CHROOT_PATH}/etc/puppet/puppet.conf ] ; then
+	. /usr/share/openstack-pkg-tools/pkgos_func
+	pkgos_add_directive ${BODI_CHROOT_PATH}/etc/puppet/puppet.conf main server=example.com "#puppet master address"
+	pkgos_inifile set ${BODI_CHROOT_PATH}/etc/puppet/puppet.conf main server ${MY_HOSTNAME}
+fi
+
+# Add ${debian_release}-${openstack_release} backport repo
+if [ "${use_debian_dot_net_backport}" = "yes" ] ; then
+	if [ -e /oci-backports-pubkey.gpg ] ; then
+		cp /oci-backports-pubkey.gpg ${BODI_CHROOT_PATH}
+		chroot ${BODI_CHROOT_PATH} apt-key add /oci-backports-pubkey.gpg
+		rm ${BODI_CHROOT_PATH}/oci-backports-pubkey.gpg
+	fi
+	if ! [ -e ${BODI_CHROOT_PATH}/etc/apt/sources.list.d/${debian_release}-${openstack_release}.list ] ; then
+		echo "deb http://${debian_release}-${openstack_release}.debian.net/debian ${debian_release}-${openstack_release}-backports main
+deb-src http://${debian_release}-${openstack_release}.debian.net/debian ${debian_release}-${openstack_release}-backports main
+
+deb http://${debian_release}-${openstack_release}.debian.net/debian ${debian_release}-${openstack_release}-backports-nochange main
+deb-src http://${debian_release}-${openstack_release}.debian.net/debian ${debian_release}-${openstack_release}-backports-nochange main
+" >${BODI_CHROOT_PATH}/etc/apt/sources.list.d/${debian_release}-${openstack_release}.list
+		chroot ${BODI_CHROOT_PATH} apt-get update
+		chroot ${BODI_CHROOT_PATH} apt-get -y -o Dpkg::Options::="--force-confnew" dist-upgrade
+	fi
+fi
+
+# Add buildd_incoming repo, so we can do quick tests with Sid
+if [ "${install_buildd_incoming}" = "yes" ] ; then
+	echo "deb ${debian_incoming_buildd} buildd-sid main
+deb-src ${debian_incoming_buildd} buildd-sid main
+" >${BODI_CHROOT_PATH}/etc/apt/sources.list.d/incoming-buildd.list
+	chroot ${BODI_CHROOT_PATH} apt-get update
+	chroot ${BODI_CHROOT_PATH} apt-get -y -o Dpkg::Options::="--force-confnew" dist-upgrade
+fi
+
+# Add the Ceph upstream repo
+if [ "${install_ceph_upstream_repo}" = "yes" ] ; then
+	echo "-----BEGIN PGP PUBLIC KEY BLOCK-----
+Version: GnuPG v1
+
+mQINBFX4hgkBEADLqn6O+UFp+ZuwccNldwvh5PzEwKUPlXKPLjQfXlQRig1flpCH
+E0HJ5wgGlCtYd3Ol9f9+qU24kDNzfbs5bud58BeE7zFaZ4s0JMOMuVm7p8JhsvkU
+C/Lo/7NFh25e4kgJpjvnwua7c2YrA44ggRb1QT19ueOZLK5wCQ1mR+0GdrcHRCLr
+7Sdw1d7aLxMT+5nvqfzsmbDullsWOD6RnMdcqhOxZZvpay8OeuK+yb8FVQ4sOIzB
+FiNi5cNOFFHg+8dZQoDrK3BpwNxYdGHsYIwU9u6DWWqXybBnB9jd2pve9PlzQUbO
+eHEa4Z+jPqxY829f4ldaql7ig8e6BaInTfs2wPnHJ+606g2UH86QUmrVAjVzlLCm
+nqoGymoAPGA4ObHu9X3kO8viMBId9FzooVqR8a9En7ZE0Dm9O7puzXR7A1f5sHoz
+JdYHnr32I+B8iOixhDUtxIY4GA8biGATNaPd8XR2Ca1hPuZRVuIiGG9HDqUEtXhV
+fY5qjTjaThIVKtYgEkWMT+Wet3DPPiWT3ftNOE907e6EWEBCHgsEuuZnAbku1GgD
+LBH4/a/yo9bNvGZKRaTUM/1TXhM5XgVKjd07B4cChgKypAVHvef3HKfCG2U/DkyA
+LjteHt/V807MtSlQyYaXUTGtDCrQPSlMK5TjmqUnDwy6Qdq8dtWN3DtBWQARAQAB
+tCpDZXBoLmNvbSAocmVsZWFzZSBrZXkpIDxzZWN1cml0eUBjZXBoLmNvbT6JAjgE
+EwECACIFAlX4hgkCGwMGCwkIBwMCBhUIAgkKCwQWAgMBAh4BAheAAAoJEOhKwsBG
+DzmUXdIQAI8YPcZMBWdv489q8CzxlfRIRZ3Gv/G/8CH+EOExcmkVZ89mVHngCdAP
+DOYCl8twWXC1lwJuLDBtkUOHXNuR5+Jcl5zFOUyldq1Hv8u03vjnGT7lLJkJoqpG
+l9QD8nBqRvBU7EM+CU7kP8+09b+088pULil+8x46PwgXkvOQwfVKSOr740Q4J4nm
+/nUOyTNtToYntmt2fAVWDTIuyPpAqA6jcqSOC7Xoz9cYxkVWnYMLBUySXmSS0uxl
+3p+wK0lMG0my/gb+alke5PAQjcE5dtXYzCn+8Lj0uSfCk8Gy0ZOK2oiUjaCGYN6D
+u72qDRFBnR3jaoFqi03bGBIMnglGuAPyBZiI7LJgzuT9xumjKTJW3kN4YJxMNYu1
+FzmIyFZpyvZ7930vB2UpCOiIaRdZiX4Z6ZN2frD3a/vBxBNqiNh/BO+Dex+PDfI4
+TqwF8zlcjt4XZ2teQ8nNMR/D8oiYTUW8hwR4laEmDy7ASxe0p5aijmUApWq5UTsF
++s/QbwugccU0iR5orksM5u9MZH4J/mFGKzOltfGXNLYI6D5Mtwrnyi0BsF5eY0u6
+vkdivtdqrq2DXY+ftuqLOQ7b+t1RctbcMHGPptlxFuN9ufP5TiTWSpfqDwmHCLsT
+k2vFiMwcHdLpQ1IH8ORVRgPPsiBnBOJ/kIiXG2SxPUTjjEGOVgeA
+=/Tod
+-----END PGP PUBLIC KEY BLOCK-----
+" >${BODI_CHROOT_PATH}/root/ceph-repo.asc
+	chroot ${BODI_CHROOT_PATH} apt-key add /root/ceph-repo.asc
+	rm ${BODI_CHROOT_PATH}/root/ceph-repo.asc
+	echo "deb ${debian_mirror_ceph} ${debian_release} main
+deb-src ${debian_mirror_ceph} ${debian_release} main
+" >${BODI_CHROOT_PATH}/etc/apt/sources.list.d/ceph.list
+	chroot ${BODI_CHROOT_PATH} apt-get update
+fi
+
+# Copy files under /oci-in-target to the root of the target
+if [ -d /oci-in-target ] ; then
+	CWD=$(pwd)
+	cd /oci-in-target
+	if [ -d usr/bin ] ; then
+		chmod +x usr/bin/*
+	fi
+	cp -auxf * ${BODI_CHROOT_PATH}
+	cd ${CWD}
+	# Make sure we have correct rights for /root/.ssh
+	mkdir -p ${BODI_CHROOT_PATH}/root
+	if [ -e ${BODI_CHROOT_PATH}/root/.ssh ] ; then
+		chmod 0700 ${BODI_CHROOT_PATH}/root/.ssh
+	fi
+	chmod 0700 ${BODI_CHROOT_PATH}/root
+	chown -R root:root ${BODI_CHROOT_PATH}/root
+	if [ -e ${BODI_CHROOT_PATH}/root/.ssh/id_rsa.pub ] ; then
+		cat ${BODI_CHROOT_PATH}/root/.ssh/id_rsa.pub >> ${BODI_CHROOT_PATH}/root/.ssh/authorized_keys
+	fi
+	if [ -e ${BODI_CHROOT_PATH}/etc ] ; then
+		chown root:root ${BODI_CHROOT_PATH}/etc || true
+		chown root:root ${BODI_CHROOT_PATH}/etc/motd || true
+		if [ -e ${BODI_CHROOT_PATH}/etc/facter ] ; then
+			chown root:root ${BODI_CHROOT_PATH}/etc/facter
+			if [ -e ${BODI_CHROOT_PATH}/etc/facter/facts.d ] ; then
+				chown root:root ${BODI_CHROOT_PATH}/etc/facter/facts.d
+				if [ -e ${BODI_CHROOT_PATH}/etc/facter/facts.d/swift_blockdevs_names_to_uuid.sh ] ; then
+					chown root:root ${BODI_CHROOT_PATH}/etc/facter/facts.d/swift_blockdevs_names_to_uuid.sh
+					chmod +x ${BODI_CHROOT_PATH}/etc/facter/facts.d/swift_blockdevs_names_to_uuid.sh
+				fi
+				if [ -e ${BODI_CHROOT_PATH}/etc/facter/facts.d/swift_fstab_dev_list.sh ] ; then
+					chown root:root ${BODI_CHROOT_PATH}/etc/facter/facts.d/swift_fstab_dev_list.sh
+					chmod +x ${BODI_CHROOT_PATH}/etc/facter/facts.d/swift_fstab_dev_list.sh
+				fi
+			fi
+		fi
+	fi
+	# Make sure we have correct rights for /etc/cron.weekly scripts
+	chown -R root:root ${BODI_CHROOT_PATH}/etc/cron.weekly || true
+	if [ -e ${BODI_CHROOT_PATH}/etc/cron.weekly/oci-fernet-keys-rotate ] ; then
+		chmod +x ${BODI_CHROOT_PATH}/etc/cron.weekly/oci-fernet-keys-rotate
+	fi
+	chown -R root:root ${BODI_CHROOT_PATH}/etc/cron.hourly || true
+	if [ -e ${BODI_CHROOT_PATH}/etc/cron.hourly/oci-glance-image-rsync ] ; then
+		chmod +x ${BODI_CHROOT_PATH}/etc/cron.hourly/oci-glance-image-rsync
+	fi
+fi
+
+# This has to be installed *after* the debootstrap, otherwise debootstrap will fail
+# and libxml-xpath-perl is a dependency of oci-fixup-compute-node
+if [ -x ${BODI_CHROOT_PATH}/usr/bin/oci-fixup-compute-node ] ; then
+	chroot ${BODI_CHROOT_PATH} apt-get install libxml-xpath-perl -y -o Dpkg::Options::="--force-confnew"
+fi
+
+# Setup the /etc/rc.local to start the puppet-agent on boot
+echo "#!/bin/sh
+
+set -e
+
+/usr/bin/oci-report-status
+
+if [ -e /var/lib/oci-first-boot ] ; then
+	rm -f /var/lib/oci-first-boot
+	if [ -x /usr/bin/oci-build-nova-instances-vg ] ; then
+		if [ -e /dev/sdb ] ; then
+			/usr/bin/oci-build-nova-instances-vg /dev/sdb
+		fi
+		if [ -e /dev/vdb ] ; then
+			/usr/bin/oci-build-nova-instances-vg /dev/vdb
+		fi
+	fi
+	if [ -x /usr/bin/oci-build-cinder-volume-vg ] ; then
+		if [ -e /dev/sdb ] ; then
+			/usr/bin/oci-build-cinder-volume-vg /dev/sdb
+		fi
+		if [ -e /dev/vdb ] ; then
+			/usr/bin/oci-build-cinder-volume-vg /dev/vdb
+		fi
+	fi
+	if [ -x /usr/bin/oci-fix-nova-ssh-config ] ; then
+		/usr/bin/oci-fix-nova-ssh-config
+	fi
+	oci-report-puppet-running
+	if ! OS_CACERT=/etc/ssl/certs/oci-pki-oci-ca-chain.pem puppet agent --test --debug >/var/log/puppet-first-run 2>&1 ; then
+		if [ -x /usr/bin/oci-fixup-compute-node ] ; then
+			/usr/bin/oci-fixup-compute-node
+		fi
+		echo \"Error during the 1st puppet run: running again...\"
+		if ! OS_CACERT=/etc/ssl/certs/oci-pki-oci-ca-chain.pem puppet agent --test --debug >/var/log/puppet-run-2 2>&1 ; then
+			oci-report-puppet-failure
+		else
+			oci-report-puppet-success
+		fi
+	else
+		oci-report-puppet-success
+	fi
+	if [ -x /usr/bin/oci-fixup-compute-node ] ; then
+		/usr/bin/oci-fixup-compute-node
+	fi
+fi
+
+" >${BODI_CHROOT_PATH}/etc/rc.local
+chmod +x ${BODI_CHROOT_PATH}/etc/rc.local
+
+# Customize /root/.screenrc
+echo "startup_message off
+defscrollback 5000
+caption always \"%{= kw}%-w%{= BW}%n %t%{-}%+w %-= @%H  -  %d.%m.%Y  - %c\"
+termcapinfo xterm 'Co#256:AB=\E[48;5;%dm:AF=\E[38;5;%dm'
+defbce on
+term screen-256color
+termcapinfo konsole-256color ti@:te@" >${BODI_CHROOT_PATH}/root/.screenrc
+
+# Setup /root/.bashrc
+echo "# ~/.bashrc: executed by bash(1) for non-login shells.
+
+export LS_OPTIONS='--color=auto'
+eval \"\$(dircolors)\"
+alias ls='ls \${LS_OPTIONS}'
+
+SYSTEM_SERIAL_NUM=\$(cat /etc/serial_number)
+
+   RED=\"\\[\\033[1;31m\\]\"
+ LGRAY=\"\\[\\033[0;37m\\]\"
+  TEAL=\"\\[\\033[38;5;6m\\]\"
+  BLUE=\"\\[\\033[1;34m\\]\"
+NO_COL=\"\\[\\033[0m\\]\"
+ LBLUE=\"\\[\\033[1;36m\\]\"
+
+export PS1=\${RED}'\\u'\${LGRAY}@\${TEAL}\${SYSTEM_SERIAL_NUM}\${LGRAY}-\${BLUE}'\\h'\${LGRAY}'>_'\${NO_COL}' \\w # '
+
+alias ssh='ssh -A -X'
+
+if [ -f /etc/bash_completion ]; then
+        . /etc/bash_completion
+fi
+
+export PAGER=most
+" > ${BODI_CHROOT_PATH}/root/.bashrc
+
+# No backup for joe
+if [ -e ${BODI_CHROOT_PATH}/etc/joe/joerc ] ; then
+	sed -i "s/^ -nobackups/-nobackups/" ${BODI_CHROOT_PATH}/etc/joe/joerc
+fi
+
+# Add Dell iDRAC software
+CHASSIS_MANUFACTURER=$(dmidecode -s system-manufacturer)
+if [ -e /etc/oci-setup-dell-ipmi-intarget ] && [ "${CHASSIS_MANUFACTURER}" = "Dell Inc." ] ; then
+	DELL_IPMI_REPO=$(cat /etc/oci-setup-dell-ipmi-intarget-repo)
+	if [ -n "${DELL_IPMI_REPO}" ] ; then
+		echo "-----BEGIN PGP PUBLIC KEY BLOCK-----
+
+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
+ZFe5xHRWSlrC3WTbzg==
+=buqa
+-----END PGP PUBLIC KEY BLOCK-----
+" >${BODI_CHROOT_PATH}/dell-ipmi-key.txt
+		chroot ${BODI_CHROOT_PATH} apt-key add /dell-ipmi-key.txt
+		rm ${BODI_CHROOT_PATH}/dell-ipmi-key.txt
+		echo "deb ${DELL_IPMI_REPO} stretch main" > ${BODI_CHROOT_PATH}/etc/apt/sources.list.d/dell-ipmi.list
+		chroot ${BODI_CHROOT_PATH} apt-get update
+		mkdir -p ${BODI_CHROOT_PATH}/opt/dell/srvadmin/lib/openmanage
+		touch ${BODI_CHROOT_PATH}/opt/dell/srvadmin/lib/openmanage/IGNORE_GENERATION
+		chroot ${BODI_CHROOT_PATH} apt-get install -y ipmitool net-tools dirmngr srvadmin-idracadm8 srvadmin-isvc srvadmin-deng dmidecode ipcalc iproute2 libopenipmi0
+
+		# Add modules to be loaded at boot time
+		for m in "ipmi_msghandler" "ipmi_devintf" "ipmi_si"; do
+			if ! grep -q "${m}" ${BODI_CHROOT_PATH}/etc/modules ; then
+				echo "${m}" >> ${BODI_CHROOT_PATH}/etc/modules
+			fi
+		done
+
+		# Create .ipc directories (to enable LCD, BMC communication)
+		rm -rf ${BODI_CHROOT_PATH}/opt/dell/srvadmin/shared/.ipc &>/dev/null || true
+		rm -rf ${BODI_CHROOT_PATH}/opt/dell/srvadmin/hapi/bin/.ipc &>/dev/null || true
+		mkdir -p ${BODI_CHROOT_PATH}/opt/dell/srvadmin/shared/.ipc
+		mkdir -p ${BODI_CHROOT_PATH}/opt/dell/srvadmin/hapi/bin/.ipc
+
+		# make_omreg_dot_cfg
+		mkdir -p ${BODI_CHROOT_PATH}/opt/dell/srvadmin/etc
+		echo "suptlib.installpath=/opt/dell/srvadmin/
+suptlib.logpath=/opt/dell/srvadmin/var/log/openmanage
+suptlib.vardatapath=/opt/dell/srvadmin/var/lib/openmanage
+suptlib.inipath=/opt/dell/srvadmin/etc/srvadmin-deng
+
+OMDataEngine.omilcore.version=8.4.0
+OMDataEngine.configtool=/opt/dell/srvadmin/sbin/dcecfg
+OMDataEngine.installpath=/opt/dell/srvadmin/
+OMDataEngine.logpath=/opt/dell/srvadmin/var/log/openmanage
+OMDataEngine.vardatapath=/opt/dell/srvadmin/var/lib/openmanage
+OMDataEngine.inipath=/opt/dell/srvadmin/etc/srvadmin-deng
+OMDataEngine.startsnmpd=true
+
+hapi.omilcore.version=8.4.0
+hapi.configtool=/opt/dell/srvadmin/sbin/dchcfg
+hapi.installpath=/opt/dell/srvadmin/
+hapi.logpath=/opt/dell/srvadmin/var/log/openmanage
+hapi.vardatapath=/opt/dell/srvadmin/var/lib/openmanage
+hapi.inipath=/opt/dell/srvadmin/etc/srvadmin-hapi
+
+openmanage.openipmi.kernel.2.6.x.ver_min_major=33
+openmanage.openipmi.kernel.2.6.x.ver_min_minor=13
+openmanage.openipmi.kernel.ver_min_major=2
+openmanage.openipmi.kernel.ver_min_minor=6
+openmanage.openipmi.kernel.ver_min_patch=15
+openmanage.openipmi.rhel3.ver_min_major=35
+openmanage.openipmi.rhel3.ver_min_minor=13
+openmanage.openipmi.rhel4.ver_min_major=33
+openmanage.openipmi.rhel4.ver_min_minor=13
+
+
+Instrumentation.omilcore.version=8.4.0
+Instrumentation.configtool=/opt/dell/srvadmin/sbin/dcicfg
+Instrumentation.installpath=/opt/dell/srvadmin/
+Instrumentation.logpath=/opt/dell/srvadmin/var/lib/openmanage
+Instrumentation.vardatapath=/opt/dell/srvadmin/var/log/openmanage
+Instrumentation.inipath=/opt/dell/srvadmin/etc/srvadmin-isvc
+openmanage.version=8.4.0
+openmanage.release=1
+openmanage.archtype=64
+openmanage.omilcore.installpath=/opt/dell/srvadmin
+openmanage.omilcore.omiverdbpath=/opt/dell/srvadmin/var/lib/srvadmin-omilcore/
+openmanage.funcs=/opt/dell/srvadmin/lib64/srvadmin-omilcore/Funcs.sh
+openmanage.syslistfile=/opt/dell/srvadmin/share/srvadmin-omilcore/syslist.txt
+openmanage.8gsyslistfile=/opt/dell/srvadmin/share/srvadmin-omilcore/8gsyslist.txt
+openmanage.9gsyslistfile=/opt/dell/srvadmin/share/srvadmin-omilcore/9gsyslist.txt
+openmanage.idracsyslistfile=/opt/dell/srvadmin/share/srvadmin-omilcore/idracsyslist.txt
+openmanage.openipmi.syslisttypesfile=/opt/dell/srvadmin/share/srvadmin-omilcore/syslisttypes.txt
+rac5.inipath=/opt/dell/srvadmin/etc/srvadmin-isvc
+" >${BODI_CHROOT_PATH}/opt/dell/srvadmin/etc/omreg.cfg
+
+		# Add Dell library path to ld config
+		if [ ! -f ${BODI_CHROOT_PATH}/etc/ld.so.conf ] || ! grep -q "/opt/dell/toolkit/lib" ${BODI_CHROOT_PATH}/etc/ld.so.conf; then
+			echo "/opt/dell/toolkit/lib" >> ${BODI_CHROOT_PATH}/etc/ld.so.conf
+		fi
+		chroot ${BODI_CHROOT_PATH} ldconfig -f /etc/ld.so.conf
+
+	fi
+fi
+if [ -e /etc/oci-setup-megacli-intarget ] ; then
+	echo "-----BEGIN PGP PUBLIC KEY BLOCK-----
+Version: GnuPG v1.4.12 (GNU/Linux)
+
+mQENBFHwGLoBCADGXHFostxbz4UzGFYtmox4pvyN1gMhq2KCuQ6f+FESa4HTd9L6
+XVhXWPCad3cdxBIls+41+AdZTWxWMu7DUdy8nMU1Ikfw6JeHcSx97G5BdxBVMjK4
+iMGfPdLfDgWf4BQ2h0dnTEWobt31WaqgNiNjNrKktqbymmF94pwYkwL53ydIA4zl
+8ZQRZooFigkS9WdoKjh30Pv/SWakILSLcSQFHK0dvSkeGd1NxT9dMNPAXXqLom4+
+7kCc0s04sS+0DwW16b0Hpb46mtsR9kzOnrE/Smj24uOGzNZen0oCc2Y7bfZlyaN+
+RlTkWEze7lemc4Byup/QWkhT0Er8F8uxexy5ABEBAAG0PEhXUmFpZCAoaHR0cDov
+L2h3cmFpZC5sZS12ZXJ0Lm5ldCkgPHJvb3RAaHdyYWlkLmxlLXZlcnQubmV0PokB
+OAQTAQIAIgUCUfAYugIbAwYLCQgHAwIGFQgCCQoLBBYCAwECHgECF4AACgkQYAUh
+DiOz07Rc4Af+N3dEZZHzLNVTjQ0+fCyeg8/flWOkR8DhP10cyoJhSHFTZRdXVshn
+kP4VmmUycVeURh76DmrIRe/9Oyca6aGXccRMqvq+HMgBPVwD5qNhcJPIuzqEvmlO
+6UIeW2ydil/v1pWu740fGntyFRQcsfqjReVPXw9K588F7MDMyL+31vLm6aorLSzR
+hvLhOmGisTs0wg2Oz9f4muauRy6cpQPw/Zi/P/F4WkQYscbHrSbhszj6OIg/vftR
+UbZ7QB26/+40B0ag4JzLpmj3scFxf/WdUl5LXazqhsbkurk7huV41BNKXi1+BS3c
+x6pFzWEHpiuG1j7U/nScGzEQpsMlUW9D+rkBDQRR8Bi6AQgAuhH1H0VLwcROI/5n
+9yTxSbTIZbyhUan3raAbit3pgo0zLagfUtp3vULVnm5ISqQcYFGLZoE1MUkmjGOL
+38W0lsIiZTaKOKXxBbLlPhhrvlXnNWAG/S1wnq7K+DV179KCTkUzaLRDbHvv999j
+9odBRtAkiTnCfHTMCN4AhydEejNxtlzJo4E5FecH4reimLI5euUdTltgCjixrbsa
+KbQftYpSMdXnLy2+00QZoXu0U/h4WZcMhOSEEiyGP9BY6m5G76n03HIeQ6eALDFu
+ryAgO+SB9rBrm/VN0kR/TZq0iA3uzLHC7zCw2aImipkr+rIuJOku0wH9MyowBbia
+bQtnCQARAQABiQEfBBgBAgAJBQJR8Bi6AhsMAAoJEGAFIQ4js9O0d5YH/3fNQgsC
+LvD0g2wdoksv5bG9CUOi9Bs0JHqI0LhXmPvMsbDojZ+zZle7KWNfK2227mWhmoG1
+WLujJSmTtxhEO1fXIdYjlDfk2uLJKuFi2wQX9n8dFDUmKY3CUJgeVZof1uQ/5C3D
+O06CcuOtf2d/+iijuW112aV1q1hoQqw71ojTET0iIV6lD/0i1eEBSSe1Ohb9yTGR
+VxTVrB78zU9hih4/Oq8wJT/Fv25aO1MDSc26CXAg0JA6IWvKal3BSPNhtz4L4FIg
+lXleArf9oJqxDO3TsV5zcLyxsIuRuxyP0+AKdSQUqv0dFi4Jf79OmvOmgwydhHjY
++f7quLbwiiDmPbU=
+=Yv6D
+-----END PGP PUBLIC KEY BLOCK-----" >${BODI_CHROOT_PATH}/megacli-key.txt
+	chroot ${BODI_CHROOT_PATH} apt-key add /megacli-key.txt
+	rm ${BODI_CHROOT_PATH}/megacli-key.txt
+	MEGACLI_REPO=$(cat /etc/oci-setup-megacli-intarget-repo)
+	echo "${MEGACLI_REPO}" > ${BODI_CHROOT_PATH}/etc/apt/sources.list.d/megacli.list
+	chroot ${BODI_CHROOT_PATH} apt-get update
+	chroot ${BODI_CHROOT_PATH} apt-get install -y megaraid-status megactl megamgr dellmgr megaclisas-status megacli
+fi
+
+# Add chassis serial number in /etc
+#CHASSIS_SERIAL_NUMBER=$(dmidecode -s chassis-serial-number)
+SYSTEM_SERIAL_NUMBER=$(dmidecode -s system-serial-number)
+echo ${SYSTEM_SERIAL_NUMBER} > ${BODI_CHROOT_PATH}/etc/serialnumber
+echo ${SYSTEM_SERIAL_NUMBER} > ${BODI_CHROOT_PATH}/etc/serial_number
+chmod 0400 ${BODI_CHROOT_PATH}/etc/serialnumber ${BODI_CHROOT_PATH}/etc/serial_number
+
+HOSTNAME=$(cat ${BODI_CHROOT_PATH}/etc/hostname)
+
+#########################################
+### Install puppet client certificate ###
+#########################################
+if [ -r /puppet-private-key.pem ] && [ -r /puppet-public-key.pem ] && [ -r /puppet-ca.pem ] && [ -r /puppet-signed-cert.pem ] ; then
+        # Install puppet so we have the puppet:puppet user
+        chroot ${BODI_CHROOT_PATH} apt-get install -y -o Dpkg::Options::="--force-confnew" puppet
+
+        # Private key
+        mkdir -p ${BODI_CHROOT_PATH}/var/lib/puppet/ssl/private_keys
+        chroot ${BODI_CHROOT_PATH} chown puppet:puppet /var/lib/puppet/ssl/private_keys
+        cp /puppet-private-key.pem ${BODI_CHROOT_PATH}/var/lib/puppet/ssl/private_keys/${HOSTNAME}.pem
+        chmod 640 ${BODI_CHROOT_PATH}/var/lib/puppet/ssl/private_keys/${HOSTNAME}.pem
+        chroot ${BODI_CHROOT_PATH} chown puppet:puppet /var/lib/puppet/ssl/private_keys/${HOSTNAME}.pem
+
+        # Public key
+        mkdir -p ${BODI_CHROOT_PATH}/var/lib/puppet/ssl/public_keys
+        chroot ${BODI_CHROOT_PATH} chown puppet:puppet /var/lib/puppet/ssl/public_keys
+        cp /puppet-public-key.pem ${BODI_CHROOT_PATH}/var/lib/puppet/ssl/public_keys/${HOSTNAME}.pem
+        chmod 644 ${BODI_CHROOT_PATH}/var/lib/puppet/ssl/public_keys/${HOSTNAME}.pem
+        chroot ${BODI_CHROOT_PATH} chown puppet:puppet /var/lib/puppet/ssl/public_keys/${HOSTNAME}.pem
+
+        # ca.pem + cert
+        mkdir -p ${BODI_CHROOT_PATH}/var/lib/puppet/ssl/certs
+        chroot ${BODI_CHROOT_PATH} chown puppet:puppet /var/lib/puppet/ssl/certs
+
+        cp /puppet-ca.pem ${BODI_CHROOT_PATH}/var/lib/puppet/ssl/certs/ca.pem
+        chmod 644 ${BODI_CHROOT_PATH}/var/lib/puppet/ssl/certs/ca.pem
+        chroot ${BODI_CHROOT_PATH} chown puppet:puppet /var/lib/puppet/ssl/certs/ca.pem
+
+        cp /puppet-signed-cert.pem ${BODI_CHROOT_PATH}/var/lib/puppet/ssl/certs/${HOSTNAME}.pem
+        chmod 644 ${BODI_CHROOT_PATH}/var/lib/puppet/ssl/certs/${HOSTNAME}.pem
+        chroot ${BODI_CHROOT_PATH} chown puppet:puppet /var/lib/puppet/ssl/certs/${HOSTNAME}.pem
+        touch ${BODI_CHROOT_PATH}/var/lib/oci-first-boot
+
+        # This is needed by puppet-openstack
+        mkdir -p ${BODI_CHROOT_PATH}/etc/facter/facts.d
+        echo "os_service_default=<SERVICE DEFAULT>" >${BODI_CHROOT_PATH}/etc/facter/facts.d/os_service_default.txt
+
+        # We need puppet to start with OCI's generated root CA cert knowledge. That's the
+        # Environment=OS_CACERT=/etc/ssl/certs/oci-pki-oci-ca-chain.pem
+        # that will do this.
+        mkdir -p ${BODI_CHROOT_PATH}/etc/systemd/system
+        echo "[Unit]
+Description=Puppet agent
+Documentation=man:puppet-agent(8)
+
+[Service]
+Environment=OS_CACERT=/etc/ssl/certs/oci-pki-oci-ca-chain.pem
+Type=forking
+PIDFile=/run/puppet/agent.pid
+ExecStart=/usr/bin/puppet agent
+
+[Install]
+WantedBy=multi-user.target
+" >${BODI_CHROOT_PATH}/etc/systemd/system/puppet.service
+fi
+
+# Overrides epmd.socket file to have it bind on all IPs
+# not just on localhost.
+mkdir -p ${BODI_CHROOT_PATH}/etc/systemd/system
+echo "[Unit]
+Description=Erlang Port Mapper Daemon Activation Socket
+
+[Socket]
+ListenStream=4369
+BindIPv6Only=both
+Accept=false
+
+[Install]
+WantedBy=sockets.target
+" >${BODI_CHROOT_PATH}/etc/systemd/system/epmd.socket
+
+##############################################################################
+### Install an eventual x509 PKI, used so OpenStack nodes trust each other ###
+##############################################################################
+# These are the CA certificates
+if ls /oci-pki* >/dev/null 2>&1 ; then
+        mkdir -p ${BODI_CHROOT_PATH}/etc/ssl/certs
+        cp /oci-pki* ${BODI_CHROOT_PATH}/etc/ssl/certs
+        chroot ${BODI_CHROOT_PATH} /usr/sbin/update-ca-certificates -f
+fi
+# These are the node's SSL keys
+if [ -r "/${HOSTNAME}.key" ] && [ -r "/${HOSTNAME}.crt" ] ; then
+        mkdir -p ${BODI_CHROOT_PATH}/etc/ssl/private/
+        cp /${HOSTNAME}.key ${BODI_CHROOT_PATH}/etc/ssl/private/ssl-cert-snakeoil.key
+        mkdir -p ${BODI_CHROOT_PATH}/etc/ssl/certs
+        cp /${HOSTNAME}.crt ${BODI_CHROOT_PATH}/etc/ssl/certs/ssl-cert-snakeoil.pem
+        chroot ${BODI_CHROOT_PATH} /usr/sbin/update-ca-certificates -f
+fi
+
+# These are the swiftproxy SSL keys
+if [ -r "/oci-pki-swiftproxy.key" ] && [ -r "/oci-pki-swiftproxy.crt" ] ; then
+	mkdir -p ${BODI_CHROOT_PATH}/etc/ssl/private/
+	cp /oci-pki-swiftproxy.key ${BODI_CHROOT_PATH}/etc/ssl/private/oci-pki-swiftproxy.key
+	mkdir -p ${BODI_CHROOT_PATH}/etc/ssl/certs
+	cp /oci-pki-swiftproxy.crt ${BODI_CHROOT_PATH}/etc/ssl/certs/oci-pki-swiftproxy.crt
+	cp /oci-pki-swiftproxy.pem ${BODI_CHROOT_PATH}/etc/ssl/private/oci-pki-swiftproxy.pem
+	chroot ${BODI_CHROOT_PATH} /usr/sbin/update-ca-certificates -f
+fi
+
+# These are the OpenStack public API SSL keys
+if [ -r /oci-pki-api.crt ] ; then
+        cp /oci-pki-api.crt ${BODI_CHROOT_PATH}/etc/ssl/certs/oci-pki-api.crt
+        chroot ${BODI_CHROOT_PATH} /usr/sbin/update-ca-certificates -f
+fi
+if [ -r /oci-pki-api.pem ] ; then
+        cp /oci-pki-api.pem ${BODI_CHROOT_PATH}/etc/ssl/private/oci-pki-api.pem
+        chroot ${BODI_CHROOT_PATH} /usr/sbin/update-ca-certificates -f
+fi
+if [ -r /oci-pki-api.key ] ; then
+        cp /oci-pki-api.key ${BODI_CHROOT_PATH}/etc/ssl/private/oci-pki-api.key
+fi
+
+# Add the nf_conntrack module by default.
+if ! grep -q nf_conntrack ${BODI_CHROOT_PATH}/etc/modules ; then echo nf_conntrack >>${BODI_CHROOT_PATH}/etc/modules ; fi

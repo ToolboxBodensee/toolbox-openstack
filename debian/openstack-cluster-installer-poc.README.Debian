@@ -1,0 +1,77 @@
+Here's how to install the PoC on your machine.
+
+1/ Make sure all your keys are in /root/.ssh/authorized_keys of your host
+
+The file will be copied in the PXE server image, and in the Debian live
+image to boot all VMs.
+
+2/ Install the repo and package
+
+Run this script, or do what it does manually:
+
+#!/bin/sh
+
+set -e
+
+openstack_release=rocky
+debian_release=stretch
+
+echo "deb http://${debian_release}-${openstack_release}.debian.net/debian ${debian_release}-${openstack_release}-backports main
+deb-src http://${debian_release}-${openstack_release}.debian.net/debian ${debian_release}-${openstack_release}-backports main
+
+deb http://${debian_release}-${openstack_release}.debian.net/debian ${debian_release}-${openstack_release}-backports-nochange main
+deb-src http://${debian_release}-${openstack_release}.debian.net/debian ${debian_release}-${openstack_release}-backports-nochange main
+" >/etc/apt/sources.list.d/openstack.list
+apt-get update
+apt-get install -y --allow-unauthenticated openstack-backports-archive-keyring
+apt-get update
+apt-get install -y apt-get install openstack-cluster-installer-poc
+
+After install, you normally have all of the dummy network and bridge up and
+running to host all of the VMs. If you need to change the network settings,
+undo the network setup:
+
+# /etc/init.d/oci-poc-virtual-network stop
+
+Edit the settings:
+
+# $EDITOR /etc/oci-poc/oci-poc.conf
+
+and re-apply the settings:
+
+# /etc/init.d/oci-poc-virtual-network start
+
+You will at least need to edit PRIMARY_DNS, SECONDA_DNS, GUESTS_DOMAIN_NAME,
+DEBIAN_MIRROR_HOST. Everything else can stay untouched. Eventually, you may
+also change NUMBER_OF_GUESTS.
+
+3/ Run the install script
+
+# oci-poc-setup
+
+Running this script will:
+  * Create a PXE server node .qcow2 image in
+    /var/lib/openstack-cluster-installer/poc/templates
+  * Create an empty 10GB HDD .qcows2 image at the same location
+  * Start /etc/init.d/oci-poc-vms. Note that at this point, this script
+    may fail, but that's kind of ok. If it happens, break it, kill it,
+    kill all the VMs and remove the PID files in /var/run/oci-poc.
+
+4/ Launch the VMs
+
+Simply run the init script:
+
+# /etc/init.d/oci-poc-vms manual-start
+
+This will:
+  * Copy qcow2 files from /var/lib/openstack-cluster-installer/poc/templates
+    to /var/lib/openstack-cluster-installer/poc/runtime.
+  * Start the PXE server VM and wait until it replies to ssh.
+  * Configure openstack-cluster-installer's db access (ie: create the db,
+    configure the oci's config file to access to it, initialize the db).
+  * Starts all slave nodes.
+
+If everything goes well, you'll be able to browse the web interface:
+http://<your-host-ip>/oci/
+
+and it will show nodes booted on the live system.
