@@ -1,3 +1,6 @@
 [submodule "openstack-ansible"]
 	path = openstack-ansible
 	url = https://github.com/openstack/openstack-ansible.git
+[submodule "openstack-cluster-installer"]
+	path = openstack-cluster-installer
+	url = https://salsa.debian.org/openstack-team/debian/openstack-cluster-installer.git
