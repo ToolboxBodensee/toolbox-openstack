@@ -1,0 +1,12 @@
+#!/bin/sh
+
+set -e
+
+KVM_PID_FILE=/var/lib/openstack-cluster-installer/vm.pid
+
+if [ -e ${KVM_PID_FILE} ] ; then
+	VM_PID=`cat ${KVM_PID_FILE}`
+	echo "===> Found PID running: ${VM_PID}. Killing process..."
+	kill -9 ${VM_PID} || true
+	rm -f ${KVM_PID_FILE}
+fi

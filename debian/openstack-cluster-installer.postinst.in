@@ -1,0 +1,57 @@
+#!/bin/sh
+
+set -e
+
+CONF=/etc/openstack-cluster-installer/openstack-cluster-installer.conf
+
+#PKGOS-INCLUDE#
+
+if [ "$1" = "configure" ] || [ "$1" = "reconfigure" ] ; then
+	. /usr/share/debconf/confmodule
+	. /usr/share/dbconfig-common/dpkg/postinst
+
+	pkgos_var_user_group oci
+
+	chmod 0440 /etc/sudoers.d/oci
+
+	install -g www-data -o www-data -m 0750 -d /etc/openstack-cluster-installer
+	if [ ! -e ${CONF} ] ; then
+		install -D -m 0640 -o www-data -g root /usr/share/openstack-cluster-installer/openstack-cluster-installer.conf ${CONF}
+	else
+		chown root:www-data ${CONF}
+		chmod 0640 ${CONF}
+	fi
+	install -g www-data -o www-data -m 0750 -d /etc/openstack-cluster-installer/hiera
+	install -g www-data -o www-data -m 0750 -d /etc/openstack-cluster-installer/hiera/roles
+	install -g www-data -o www-data -m 0750 -d /etc/openstack-cluster-installer/hiera/nodes
+	touch /etc/openstack-cluster-installer/hiera/all.yaml
+	chown www-data:www-data /etc/openstack-cluster-installer/hiera/all.yaml
+
+	# Install the web interface
+	A2EN=$(which a2ensite)
+	if [ -x "${A2EN}" ] ; then
+		${A2EN} openstack-cluster-installer.conf
+	fi
+
+	# This is where we store node files when doing provisioning.
+	mkdir -p /var/lib/oci/clusters
+	chown www-data:www-data /var/lib/oci/clusters
+
+	chown www-data:www-data /var/lib/oci
+	mkdir -p /var/lib/oci/ssl
+	chown www-data:www-data /var/lib/oci/ssl
+
+	# Setup the db's password
+	db_get openstack-cluster-installer/configure_db
+	if [ "$RET" = "true" ]; then
+		pkgos_dbc_postinst --suite oci ${CONF} database connection openstack-cluster-installer $@
+		sed -i "s#connection = #connection=#" ${CONF}
+		cd /usr/share/openstack-cluster-installer && php db_sync.php
+	fi
+	db_stop
+	chgrp www-data /etc/openstack-cluster-installer
+fi
+
+#DEBHELPER#
+
+exit 0

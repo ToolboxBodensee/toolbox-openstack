@@ -1,0 +1,6 @@
+www-data ALL = (root) NOPASSWD: /usr/bin/puppet cert clean *
+www-data ALL = (root) NOPASSWD: /usr/bin/puppet cert sign *
+www-data ALL = (root) NOPASSWD: /usr/bin/puppet ca generate *
+www-data ALL = (root) NOPASSWD: /usr/bin/oci-remove-slave-node-generated-key *
+www-data ALL = (root) NOPASSWD: /usr/bin/oci-copy-slave-node-generate-key *
+www-data ALL = (root) NOPASSWD: /usr/bin/oci-gen-slave-node-cert *

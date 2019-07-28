@@ -1,0 +1,79 @@
+#!/bin/sh
+
+set -e
+#set -x
+
+show_disk_status () {
+	#number of physical disks
+	local en npd counter
+	en=$(megacli -EncInfo -aALL -NoLog | awk '/Device ID/ {print $4}')
+	npd=$(megacli -EncInfo -aALL -NoLog | awk '/Number of Slots/ {print $5}')
+	counter=0
+
+	echo "Slot,Status,Size"
+	while [ "$counter" -lt "$npd" ] ; do
+		raw_dinfo=$(megacli -PDInfo -PhysDrv [${en}:${counter}] -aALL -NoLog)
+		dstatus=$(echo "$raw_dinfo" | awk '/^Firmware state/ {print $3}'|tr -d ',')
+#		inq=$(echo "$raw_dinfo" | awk '/^Inqu/ {print $3" "$4}')
+#		dtype=$(echo "$raw_dinfo" | awk '/^PD/ {print $3}')
+#		dpred=$(echo "$raw_dinfo" | awk '/^Predic/ {print $4}')
+		dsize=$(echo "$raw_dinfo" | awk '/^Raw Size/ {print $3}')
+#		dtechno=$(echo "$raw_dinfo" | perl -ne 'print $1 if /^Media Type:\s+(.*)/;')
+		echo $counter,$dstatus,$dsize
+		counter=$(($counter + 1))
+	done
+}
+
+replace_disk () {
+	OLD_DISK=$1
+	NEW_DISK=$2
+	OLD_UUID=$(cat /etc/fstab | grep /srv/node/${OLD_DISK} | awk '{print $1}' | sed -e 's/[#]*UUID=//')
+	echo "===> Formating /dev/${NEW_DISK} with UUID ${OLD_UUID}"
+	mkfs.xfs -m uuid=${OLD_UUID} /dev/${NEW_DISK}
+	echo "===> Uncommenting from fstab"
+	sed -i "s/[#]*UUID=${OLD_UUID}/UUID=${OLD_UUID}/" /etc/fstab
+	echo "===> Mounting /srv/node/${OLD_DISK}"
+	mount /srv/node/${OLD_DISK}
+	echo "===> Changing disk's owner"
+	chown swift:swift /srv/node/${OLD_DISK}
+}
+
+usage () {
+	echo "                     -l : list devices (columns output)"
+	echo "                   -csv : list devices (csv output)"
+	echo "                -s <ID> : setup RAID device"
+	echo "-r <hold-hdd> <new-hdd> : format and mount <new-hdd> to replace <old-hdd>"
+	exit 1
+}
+
+if [ "${1}" = "-csv" ] ; then
+	show_disk_status
+	exit 0
+else
+	case ${1} in
+	"-s")
+		if [ -z "${2}" ] ; then
+			usage
+		fi
+		echo "Setting up RAID for device ${2}..."
+		megacli -DiscardPreservedCache -Lall -a0
+		megacli -CfgLdAdd -r0[32:${2}] WB RA Direct -a0
+		;;
+	"-l")
+		$0 -csv | column -t -s $','
+		exit 0
+		;;
+	"-r")
+		if [ -z "${2}" ] ; then
+			usage
+		fi
+		if [ -z "${3}" ] ; then
+			usage
+		fi
+		replace_disk ${2} ${3}
+		;;
+	*)
+		usage
+		;;
+	esac
+fi

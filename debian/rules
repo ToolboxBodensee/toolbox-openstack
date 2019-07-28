@@ -1,0 +1,19 @@
+#!/usr/bin/make -f
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	/usr/share/openstack-pkg-tools/pkgos_insert_include pkgos_func openstack-cluster-installer.config
+	/usr/share/openstack-pkg-tools/pkgos_insert_include pkgos_func openstack-cluster-installer.postinst
+	/usr/share/openstack-pkg-tools/pkgos_insert_include pkgos_postrm openstack-cluster-installer.postrm
+	pkgos-merge-templates openstack-cluster-installer openstack-cluster-installer db
+
+override_dh_install:
+	dh_install
+	install -D -m 0440 $(CURDIR)/debian/openstack-cluster-installer.sudoers $(CURDIR)/debian/openstack-cluster-installer/etc/sudoers.d/oci
+
+override_dh_installinit:
+	dh_installinit
+	dh_installinit -p openstack-cluster-installer-poc --name=oci-poc-virtual-network --no-restart-after-upgrade
+	dh_installinit -p openstack-cluster-installer-poc --name=oci-poc-vms --no-restart-after-upgrade --no-start

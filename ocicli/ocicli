@@ -1,0 +1,867 @@
+#!/bin/sh
+
+set -e
+
+if [ -z "${OCI_API_URL}" ] ; then
+	echo "Please add: export OCI_API_URL=\"http(s)://<url-or-IP-of-your-oci-server>/oci/api.php?\""
+	echo "to your .bashrc in order to use "$(basename $0)
+	echo "You may as well want to set OCI_LOGIN and OCI_PASS to be authenticated."
+	exit 1
+fi
+
+usage (){
+	echo $(basename $0)": configure your baremetal cluster through the OCI API."
+	echo ""
+	echo $(basename $0)" <action>"
+	echo ""
+	echo "Actions are:"
+	echo "  machine-list"
+	echo "  machine-show <machine_serial>"
+	echo "  machine-set <machine_serial> --use_ceph_if_available <yes/no> --install-on-raid <yes/no> --raid-type <0/1/10/5> --raid-dev0 sda --raid-dev1 sdb --raid-dev2 sdc --raid-dev3 sdd --serial-console-device <ttyS0/ttyS1/none>"
+	echo "  machine-add <machine_serial> <cluster_name> <role_name> <location_name>: add a machine to a cluster"
+	echo "  machine-remove <machine_serial>: remove a machine from a cluster"
+	echo "  machine-destroy <machine_serial>: completely remove a machine from OCI's db"
+	echo "  machine-display-install-cmd <machine_serial>: display install command (without running it)"
+	echo "  machine-reboot-on-hdd <machine_serial>"
+	echo "  machine-reboot-on-live <machine_serial>"
+	echo "  machine-ipmi-reboot-on-hdd <machine_serial>"
+	echo "  machine-ipmi-reboot-on-live <machine_serial>"
+	echo "  machine-install-os <machine_serial>"
+	echo "  machine-install-log <machine_serial>"
+	echo "  machine-set-ipmi [--do-ipmitool-cmds] [--ipmi-defgw GATEWAY] [--ipmi-netmask NETMASK] [--ipmi-call-chassis-bootdev yes/no] <serial> <use-ipmi:yes/no> <ipmi-ip-addr> <ipmi-port> <ipmi-username> <ipmi-password>"
+	echo "  machine-console <serial>"
+	echo ""
+	echo "  network-list"
+	echo "  network-set <network-name> [--cidr MASK] [--iface1 IFDEFINITION] [--iface2 IFDEFINITION] [--ip IPv4] [--is-public yes/no] [--location location-name] [--mtu MTU] [--role ROLE] [--vlan VLAN_NUM] [--bridge-name NAME]"
+	echo "  network-create <network-name> <ip> <cidr_mask> <location-name> <is-public:yes/no>"
+	echo "  network-delete <network-name>"
+	echo "  network-add <network-name> <cluster_name> <role_name> <iface1> <iface2>"
+	echo "  network-remove <network-name>"
+	echo ""
+	echo "  location-list"
+	echo "  location-create <location-name> <swiftregion-name>"
+	echo "  location-delete <location-name>"
+	echo ""
+	echo "  swift-region-list"
+	echo "  swift-region-create <swiftregion-name>"
+	echo "  swift-region-delete <swiftregion-name>"
+	echo ""
+	echo "  swift-calculate-ring <cluster-name>"
+	echo ""
+	echo "  cluster-list"
+	echo "  cluster-create <cluster-name> <domaine-name.com>"
+	echo "  cluster-delete <cluster-name>"
+	echo "  cluster-show <cluster-name>"
+	echo "  cluster-set <cluster-name> [--time-server-host <time-server-hostname>] [--swift-part-power <int>] [--swift-proxy-hostname <hostname>] [--time-server-host <hostname>] [--swift-encryption-key-id <UUID>] [--swift-disable-encryption <yes/no>] [--amp-secgroup-list <SECGROUP-UUID-LIST>] [ --amp-boot-network-list <AMP_BOOT_NETWORK_LIST>] [--disable-notifications <yes/no>] [--enable-monitoring-graphs <yes/no>] [--monitoring-graphite-host <hostname>] [--monitoring-graphite-port <port>]"
+	echo "  cluster-show-networks <cluster-name>"
+	echo "  cluster-show-machines <cluster-name>"
+	echo "  cluster-show-ips <cluster-name>"
+	echo ""
+	echo "  role-list"
+	echo "  role-create <name>"
+	echo "  role-delete <name>"
+	exit 1
+}
+
+# Parameter: $1 = URL param
+# return: API_RESPONSE_FILE
+# The function exits printing API message if status != success
+ocicli_call (){
+	local STATUS MESSAGE URL_PARAM
+	if [ -z "${1}" ] ; then
+		echo "Missing URL_PARAM when calling ocicli_call()"
+		exit 1
+	fi
+	URL_PARAM="${1}"
+
+	if [ -n "${OCI_LOGIN}" ] && [ -n "${OCI_PASS}" ] ; then
+		URL_PARAM="${URL_PARAM}&oci_login=${OCI_LOGIN}&oci_pass=${OCI_PASS}"
+	fi
+
+	API_RESPONSE_FILE=$(mktemp -t oci-poc-install-cluster.XXXXXX)
+	if [ "${DEBUG}" = "on" ] ; then
+		echo "curl -s \"${OCI_API_URL}${URL_PARAM}\""
+	fi
+	curl -s ${OCI_API_URL}${URL_PARAM} >${API_RESPONSE_FILE}
+	STATUS=$(cat ${API_RESPONSE_FILE} | jq -r '.["status"]')
+	if ! [ "${STATUS}" = "success" ] ; then
+		echo "Could not query API:"
+		MESSAGE=$(cat ${API_RESPONSE_FILE} | jq -r '.["message"]')
+		echo $MESSAGE
+		rm ${API_RESPONSE_FILE}
+		exit 1
+	fi
+}
+
+ocicli_machine_list (){
+	ocicli_call "action=machine_list"
+	echo "serial,Cur_ip,memory,status,puppet,lastseen,cluster,ladvd,product_name,BIOSver,IPMIver,IPMI_IP,hostname,notes,dc,row,rack,ustart,uend"
+	cat ${API_RESPONSE_FILE} | jq -r '.["data"]|=sort_by(.product_name,.serial)|.["data"][] | "\(.serial),\(.ipaddr),\(.memory),\(.status),\(.puppet_status),\(.lastseen),\(.cluster),\(.ladvd_report),\(.product_name),\(.bios_version),\(.ipmi_firmware_version),\(.ipmi_detected_ip),\(.hostname),\(.notes),\(.loc_dc),\(.loc_row),\(.loc_rack),\(.loc_u_start),\(.loc_u_end)"'
+}
+
+ocicli_machine_show (){
+	ocicli_call "action=machine_show&machine_serial=${1}"
+	echo "Attribute,value"
+	# Normal attributes
+	OCICLI_MACHINE_SHOW_SERIAL=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.serial)"')
+	OCICLI_MACHINE_SHOW_IPADDR=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.ipaddr)"')
+	OCICLI_MACHINE_SHOW_MEMORY=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.memory)"')
+	OCICLI_MACHINE_SHOW_STATUS=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.status)"')
+	OCICLI_MACHINE_SHOW_CLUSTER_ID=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.cluster)"')
+	OCICLI_MACHINE_SHOW_PUPPET=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.puppet_status)"')
+	OCICLI_MACHINE_SHOW_LASTSEEN=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.lastseen)"')
+	OCICLI_MACHINE_SHOW_ROLE=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.role)"')
+	OCICLI_MACHINE_SHOW_LADVD=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.ladvd_report)"')
+	OCICLI_MACHINE_SHOW_PRODUCT=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.product_name)"')
+	OCICLI_MACHINE_SHOW_BIOS_VER=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.bios_version)"')
+	OCICLI_MACHINE_SHOW_LADVD_REPORT=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.ladvd_report)"')
+
+	# Location attributes
+	OCICLI_MACHINE_SHOW_LOC_DC=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.loc_dc)"')
+	OCICLI_MACHINE_SHOW_LOC_ROW=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.loc_row)"')
+	OCICLI_MACHINE_SHOW_LOC_RACK=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.loc_rack)"')
+	OCICLI_MACHINE_SHOW_LOC_USTART=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.loc_u_start)"')
+	OCICLI_MACHINE_SHOW_LOC_UEND=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.loc_u_end)"')
+	OCICLI_MACHINE_SHOW_NOTES=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.notes)"')
+
+
+	OCICLI_MACHINE_SHOW_IPMI_VER=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.ipmi_firmware_version)"')
+	OCICLI_MACHINE_SHOW_IPMI_DETECTED_IP=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.ipmi_detected_ip)"')
+	OCICLI_MACHINE_SHOW_USE_IPMI=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.ipmi_use)"')
+	OCICLI_MACHINE_SHOW_CALL_IPMI_BOOTDEV=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.ipmi_call_chassis_bootdev)"')
+	OCICLI_MACHINE_SHOW_IPMI_ADDR=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.ipmi_addr)"')
+	OCICLI_MACHINE_SHOW_IPMI_PORT=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.ipmi_port)"')
+	OCICLI_MACHINE_SHOW_IPMI_USERNAME=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.ipmi_username)"')
+	OCICLI_MACHINE_SHOW_IPMI_PASSWORD=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.ipmi_password)"')
+
+	OCICLI_MACHINE_SHOW_HOSTNAME=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.hostname)"')
+	OCICLI_MACHINE_SHOW_NOTES=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.notes)"')
+	OCICLI_MACHINE_SHOW_USE_CEPH=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.use_ceph_if_available)"')
+
+	OCICLI_MACHINE_SHOW_INSTALL_ON_RAID=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.install_on_raid)"')
+	OCICLI_MACHINE_SHOW_RAID_TYPE=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.raid_type)"')
+	OCICLI_MACHINE_SHOW_RAID_DEV0=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.raid_dev0)"')
+	OCICLI_MACHINE_SHOW_RAID_DEV1=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.raid_dev1)"')
+	OCICLI_MACHINE_SHOW_RAID_DEV2=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.raid_dev2)"')
+	OCICLI_MACHINE_SHOW_RAID_DEV3=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.raid_dev3)"')
+
+	OCICLI_MACHINE_SHOW_SERIAL_CONSOLE_DEV=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.serial_console_dev)"')
+
+	# From cluster
+	OCICLI_MACHINE_SHOW_CLUSTER_NAME=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.machine_cluster.name)"')
+
+	echo "Serial:,${OCICLI_MACHINE_SHOW_SERIAL}"
+	if [ "${OCICLI_MACHINE_SHOW_ROLE}" = "compute" ] ; then
+		echo "Use Ceph if available:,${OCICLI_MACHINE_SHOW_USE_CEPH}"
+	fi
+	echo "Hostname:,${OCICLI_MACHINE_SHOW_HOSTNAME}"
+
+	echo "Role:,${OCICLI_MACHINE_SHOW_ROLE}"
+	echo "Cluster name:,${OCICLI_MACHINE_SHOW_CLUSTER_NAME}"
+	echo "Cluster ID:,${OCICLI_MACHINE_SHOW_CLUSTER_ID}"
+	echo "Location:,DC:${OCICLI_MACHINE_SHOW_LOC_DC}/Row:${OCICLI_MACHINE_SHOW_LOC_ROW}/Rack:${OCICLI_MACHINE_SHOW_LOC_RACK}/U:${OCICLI_MACHINE_SHOW_LOC_USTART}-${OCICLI_MACHINE_SHOW_LOC_UEND}"
+	echo "Notes:,${OCICLI_MACHINE_SHOW_NOTES}"
+
+	echo "Status:,${OCICLI_MACHINE_SHOW_STATUS}"
+	echo "Puppet:,${OCICLI_MACHINE_SHOW_PUPPET}"
+	echo "Product name:,${OCICLI_MACHINE_SHOW_PRODUCT}"
+	echo "Memory:,${OCICLI_MACHINE_SHOW_MEMORY}"
+	echo "BIOS version:,${OCICLI_MACHINE_SHOW_BIOS_VER}"
+	echo "LADVD report:,${OCICLI_MACHINE_SHOW_LADVD_REPORT}"
+	echo "Last seen:,${OCICLI_MACHINE_SHOW_LASTSEEN}"
+	echo "Current IP address:,${OCICLI_MACHINE_SHOW_IPADDR}"
+
+	echo "IPMI firmware:,${OCICLI_MACHINE_SHOW_IPMI_VER}"
+	echo "Detected IPMI IP:,${OCICLI_MACHINE_SHOW_IPMI_DETECTED_IP}"
+	echo "Use IPMI:,${OCICLI_MACHINE_SHOW_USE_IPMI}"
+	echo "Call IPMI bootdev:,${OCICLI_MACHINE_SHOW_CALL_IPMI_BOOTDEV}"
+	echo "IPMI addr:,${OCICLI_MACHINE_SHOW_IPMI_ADDR}",
+	echo "IPMI port:,${OCICLI_MACHINE_SHOW_IPMI_PORT}",
+	echo "IPMI username:,${OCICLI_MACHINE_SHOW_IPMI_USERNAME}"
+	echo "IPMI password:,${OCICLI_MACHINE_SHOW_IPMI_PASSWORD}"
+
+	echo -n "IPs:,"
+	CNT=1
+	for i in $(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.machine_ips)"' | jq -r '.[].ipaddr') ; do
+		network_name=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.machine_ips)"' | jq -r '.[].networkname' | head -n ${CNT} | tail -n 1)
+		echo -n "${i} (${network_name}) "
+		CNT=$(( ${CNT} + 1 ))
+	done
+	echo ""
+
+	echo -n "Interfaces:,"
+	for i in $(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.machine_ifs)"' | jq -r '.[].name') ; do
+		SPEED=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]["machine_ifs"][] | select(.name == "'${i}'") | .["max_speed"]')
+		MACADDR=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]["machine_ifs"][] | select(.name == "'${i}'") | .["macaddr"]')
+		if [ "${SPEED}" -lt 1000 ] ; then
+			H_SPEED="${SPEED}Mb/s"
+		else
+			DISPLAY_SPEED=$(( ${SPEED} / 1000 ))
+			H_SPEED="${DISPLAY_SPEED}Gb/s"
+		fi
+
+		echo -n "${i} (${MACADDR}@${H_SPEED}) "
+	done
+	echo ""
+
+	echo -n "Block devices:,"
+	for i in $(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.machine_blockdevices)"' | jq -r '.[].name') ; do
+		SIZE_MB=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]["machine_blockdevices"][] | select(.name == "'${i}'") | .["size_mb"]')
+		SIZE_GB=$((${SIZE_MB} / 1024))
+		echo -n "${i}:${SIZE_GB}G "
+	done
+	echo ""
+
+	echo "Install on RAID:,${OCICLI_MACHINE_SHOW_INSTALL_ON_RAID}"
+	echo "Raid type:,${OCICLI_MACHINE_SHOW_RAID_TYPE}"
+	echo "Raid device 0:,${OCICLI_MACHINE_SHOW_RAID_DEV0}"
+	echo "Raid device 1:,${OCICLI_MACHINE_SHOW_RAID_DEV1}"
+	case ${OCICLI_MACHINE_SHOW_RAID_TYPE} in
+	0|1)
+		echo -n ""
+	;;
+	5|10)
+		echo "Raid device 2:,${OCICLI_MACHINE_SHOW_RAID_DEV2}"
+		echo "Raid device 3:,${OCICLI_MACHINE_SHOW_RAID_DEV3}"
+	;;
+	esac
+
+	echo "Serial console device:,${OCICLI_MACHINE_SHOW_SERIAL_CONSOLE_DEV}"
+}
+
+ocicli_machine_set (){
+	SERIAL=${1}
+	shift
+	COMMAND="action=machine_set&machine_serial=${SERIAL}"
+	for i in $@ ; do
+		case "${1}" in
+		"--use_ceph_if_available")
+			COMMAND="${COMMAND}&use_ceph=${2}"
+			shift
+			shift
+		;;
+		"--install-on-raid")
+			COMMAND="${COMMAND}&install_on_raid=${2}"
+			shift
+			shift
+		;;
+		"--raid-type")
+			COMMAND="${COMMAND}&raid_type=${2}"
+			shift
+			shift
+		;;
+		"--raid-dev0")
+			COMMAND="${COMMAND}&raid_dev0=${2}"
+			shift
+			shift
+		;;
+		"--raid-dev1")
+			COMMAND="${COMMAND}&raid_dev1=${2}"
+			shift
+			shift
+		;;
+		"--raid-dev2")
+			COMMAND="${COMMAND}&raid_dev2=${2}"
+			shift
+			shift
+		;;
+		"--raid-dev3")
+			COMMAND="${COMMAND}&raid_dev3=${2}"
+			shift
+			shift
+		;;
+		"--serial-console-device")
+			COMMAND="${COMMAND}&serial_console_device=${2}"
+			shift
+			shift
+		;;
+		"--dc")
+			COMMAND="${COMMAND}&loc_dc=${2}"
+			shift
+			shift
+		;;
+		"--row")
+			COMMAND="${COMMAND}&loc_row=${2}"
+			shift
+			shift
+		;;
+		"--rack")
+			COMMAND="${COMMAND}&loc_rack=${2}"
+			shift
+			shift
+		;;
+		"--ustart")
+			COMMAND="${COMMAND}&loc_u_start=${2}"
+			shift
+			shift
+		;;
+		"--uend")
+			COMMAND="${COMMAND}&loc_u_end=${2}"
+			shift
+			shift
+		;;
+		*)
+			echo -n ""
+		;;
+		esac
+	done
+	ocicli_call ${COMMAND}
+	ocicli_display_status
+}
+
+ocicli_location_list (){
+	ocicli_call "action=location_list"
+	echo "id,name,swiftregion"
+	cat ${API_RESPONSE_FILE} | jq -r '.["data"][] | "\(.id),\(.name),\(.swiftregion)"'
+}
+
+
+ocicli_network_list (){
+	ocicli_call "action=network_list"
+	echo "name,ip,cidr,is_public,cluster,role,iface1,iface2,bridgename,vlan,mtu,location"
+	cat ${API_RESPONSE_FILE} | jq -r '.["data"]|=sort_by(.name)|.["data"][] | "\(.name),\(.ip),\(.cidr),\(.is_public),\(.cluster),\(.role),\(.iface1),\(.iface2),\(.bridgename),\(.vlan),\(.mtu),\(.location)"'
+}
+
+ocicli_cluster_list (){
+	ocicli_call "action=cluster_list"
+	echo "id,name,domain"
+	cat ${API_RESPONSE_FILE} | jq -r '.["data"]|=sort_by(.name)|.["data"][] | "\(.id),\(.name),\(.domain)"'
+}
+
+ocicli_cluster_show (){
+	ocicli_call "action=cluster_show&name=${1}"
+	OCICLI_CLUSTER_SHOW_NAME=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.name)"')
+	OCICLI_CLUSTER_SHOW_DOMAIN=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.domain)"')
+	OCICLI_CLUSTER_SHOW_VIP_HOSTNAME=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.vip_hostname)"')
+	OCICLI_CLUSTER_SHOW_SWIFT_PART_POWER=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.swift_part_power)"')
+	OCICLI_CLUSTER_SHOW_SWIFT_REPLICAS=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.swift_replicas)"')
+	OCICLI_CLUSTER_SHOW_SWIFT_MIN_PART_HOURS=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.swift_min_part_hours)"')
+	OCICLI_CLUSTER_SHOW_SWIFT_PROXY_HOSTNAME=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.swift_proxy_hostname)"')
+	OCICLI_CLUSTER_SHOW_SWIFT_ENCRYPTION_KEY=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.swift_encryption_key_id)"')
+	OCICLI_CLUSTER_SHOW_SWIFT_DISABLE_ENCRYPTION=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.swift_disable_encryption)"')
+	OCICLI_CLUSTER_SHOW_HAPROXY_CUSTOM_URL=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.haproxy_custom_url)"')
+	OCICLI_CLUSTER_SHOW_STATSD_HOSTNAME=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.statsd_hostname)"')
+	OCICLI_CLUSTER_SHOW_TIME_SERVER_HOST=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.time_server_host)"')
+	OCICLI_CLUSTER_SHOW_AMP_SECGROUP_LIST=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.amp_secgroup_list)"')
+	OCICLI_CLUSTER_SHOW_AMP_BOOT_NETWORK_LIST=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.amp_boot_network_list)"')
+	OCICLI_CLUSTER_SHOW_DISABLE_NOTIFICATIONS=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.disable_notifications)"')
+	OCICLI_CLUSTER_SHOW_ENABLE_MONITORING_GRAPHS=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.enable_monitoring_graphs)"')
+	OCICLI_CLUSTER_SHOW_MONITORING_GRAPHITE_HOST=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.monitoring_graphite_host)"')
+	OCICLI_CLUSTER_SHOW_MONITORING_GRAPHITE_PORT=$(cat ${API_RESPONSE_FILE} | jq -r '.["data"]| "\(.monitoring_graphite_port)"')
+
+	echo "Name:,${OCICLI_CLUSTER_SHOW_NAME}"
+	echo "Domain:,${OCICLI_CLUSTER_SHOW_DOMAIN}"
+	echo "VIP Hostname:,${OCICLI_CLUSTER_SHOW_VIP_HOSTNAME}"
+	echo "Swift part power:,${OCICLI_CLUSTER_SHOW_SWIFT_PART_POWER}"
+	echo "Swift replicas:,${OCICLI_CLUSTER_SHOW_SWIFT_REPLICAS}"
+	echo "Swift min part hours:,${OCICLI_CLUSTER_SHOW_SWIFT_MIN_PART_HOURS}"
+	echo "Swift proxy hostname:,${OCICLI_CLUSTER_SHOW_SWIFT_PROXY_HOSTNAME}"
+	echo "Swift encryption key uuid:,${OCICLI_CLUSTER_SHOW_SWIFT_ENCRYPTION_KEY}"
+	echo "Swift disable encryption:,${OCICLI_CLUSTER_SHOW_SWIFT_DISABLE_ENCRYPTION}"
+	echo "Haproxy custom url:,${OCICLI_CLUSTER_SHOW_HAPROXY_CUSTOM_URL}"
+	echo "Statsd hostname:,${OCICLI_CLUSTER_SHOW_STATSD_HOSTNAME}"
+	echo "Time server host:,${OCICLI_CLUSTER_SHOW_TIME_SERVER_HOST}"
+	echo "amp_secgroup_list:,${OCICLI_CLUSTER_SHOW_AMP_SECGROUP_LIST}"
+	echo "amp_boot_network_list:,${OCICLI_CLUSTER_SHOW_AMP_BOOT_NETWORK_LIST}"
+	echo "disable_notifications:,${OCICLI_CLUSTER_SHOW_DISABLE_NOTIFICATIONS}"
+	echo "enable_monitoring_graphs:,${OCICLI_CLUSTER_SHOW_ENABLE_MONITORING_GRAPHS}"
+	echo "monitoring_graphite_host:,${OCICLI_CLUSTER_SHOW_MONITORING_GRAPHITE_HOST}"
+	echo "monitoring_graphite_port:,${OCICLI_CLUSTER_SHOW_MONITORING_GRAPHITE_PORT}"
+}
+
+ocicli_swiftregion_list () {
+	ocicli_call "action=swiftregion_list"
+	echo "id,name"
+	cat ${API_RESPONSE_FILE} | jq -r '.["data"]|=sort_by(.name)|.["data"][] | "\(.id),\(.name)"'
+}
+
+ocicli_cluster_show_networks (){
+	ocicli_call "action=cluster_show_networks&cluster_name=${1}"
+	echo "name,ip,cidr,is_public,cluster,role,iface1,iface2,location_id"
+	cat ${API_RESPONSE_FILE} | jq -r '.["data"]|=sort_by(.name)|.["data"][] | "\(.name),\(.ip),\(.cidr),\(.is_public),\(.cluster),\(.role),\(.iface1),\(.iface2),\(.location_id)"'
+}
+
+ocicli_cluster_show_machines (){
+	ocicli_call "action=cluster_show_machines&cluster_name=${1}"
+	echo "serial,ipaddr,memory,status,lastseen,hostname"
+	cat ${API_RESPONSE_FILE} | jq -r '.["data"]|=sort_by(.serial)|.["data"][] | "\(.serial),\(.ipaddr),\(.memory),\(.status),\(.lastseen),\(.hostname)"'
+}
+
+ocicli_role_list (){
+	ocicli_call "action=role_list"
+	echo "id,name"
+	cat ${API_RESPONSE_FILE} | jq -r '.["data"]|=sort_by(.name)|.["data"][] | "\(.id),\(.name)"'
+}
+
+ocicli_display_status (){
+	STATUS=$(cat ${API_RESPONSE_FILE} | jq -r '.["status"]')
+	if [ "${STATUS}" = 'success' ] ; then
+		echo "Ok."
+	else
+		echo "Status not ok:"
+		cat ${API_RESPONSE_FILE} | jq -r '.["message"]'
+	fi
+}
+
+#########################
+### Parameter parsing ###
+#########################
+
+if [ -z "${1}" ] ; then
+	usage
+fi
+
+if [ "${1}" = -d ] ; then
+	DEBUG=on
+	MINUS_D="-d"
+	shift
+fi
+
+# If using -csv, procress as normal
+if [ "${1}" = -csv ] ; then
+	shift
+else
+	# If not, (and not for all commands...), we call ourself with -csv and filter the CSV output through the column program
+	case ${1} in
+	"machine-install-os")
+		echo -n ""
+	;;
+	"machine-display-install-cmd")
+		echo -n ""
+	;;
+	"machine-install-log")
+		echo -n ""
+	;;
+	"machine-set-ipmi")
+		echo -n ""
+	;;
+	"machine-console")
+		echo -n ""
+	;;
+	"swift-calculate-ring")
+		echo -n ""
+	;;
+	*)
+		$0 ${MINUS_D} -csv $@ | column -t -s $','
+		exit 0
+	;;
+	esac
+fi
+
+ACTION=${1}
+shift
+
+case "${ACTION}" in
+	"machine-list")
+		ocicli_machine_list
+	;;
+	"machine-show")
+		ocicli_machine_show ${1}
+	;;
+	"machine-set")
+		ocicli_machine_set $@
+	;;
+	# Add a machine to a cluster
+	"machine-add")
+		ocicli_call "action=machine_add&machine_serial=${1}&cluster_name=${2}&role_name=${3}&location_name=${4}"  
+		ocicli_display_status
+	;;
+	"machine-remove")
+		ocicli_call "action=machine_remove&machine_serial=${1}"
+		ocicli_display_status
+	;;
+	"machine-destroy")
+		ocicli_call "action=machine_destroy&machine_serial=${1}"
+		ocicli_display_status
+	;;
+	"machine-show-from-hostname")
+		ocicli_call "action=machine_show_from_hostname&hostname=${1}"
+		echo "serial,ipaddr,memory,status,lastseen,hostname"
+		cat ${API_RESPONSE_FILE} | jq -r '.["data"] | "\(.serial),\(.ipaddr),\(.memory),\(.status),\(.lastseen),\(.hostname)"'
+	;;
+	"machine-reboot-on-hdd")
+		ocicli_call "action=machine_reboot_on_hdd&serial=${1}"
+		ocicli_display_status
+	;;
+	"machine-reboot-on-live")
+		ocicli_call "action=machine_reboot_on_live&serial=${1}"
+		ocicli_display_status
+	;;
+	"machine-ipmi-reboot-on-hdd")
+		ocicli_call "action=ipmi_reboot_on_hdd&serial=${1}"
+		ocicli_display_status
+	;;
+	"machine-ipmi-reboot-on-live")
+		ocicli_call "action=ipmi_reboot_on_live&serial=${1}"
+		ocicli_display_status
+	;;
+	"machine-install-os")
+		ocicli_call "action=machine_install_os&serial=${1}"
+		cat ${API_RESPONSE_FILE} | jq -r '.["data"]'
+	;;
+	"machine-display-install-cmd")
+		ocicli_call "action=machine_display_install_cmd&serial=${1}"
+		cat ${API_RESPONSE_FILE} | jq -r '.["data"]'
+	;;
+	"machine-install-log")
+		ocicli_call "action=machine_install_log&serial=${1}"
+		cat ${API_RESPONSE_FILE} | jq -r '.["data"]'
+	;;
+	"machine-set-ipmi")
+		# Prototype: machine-set-ipmi [--do-ipmitool-cmds] [--ipmi-defgw GATEWAY] [--ipmi-netmask NETMASK] [--ipmi-call-chassis-bootdev yes/no] <serial> <use-ipmi:yes/no> <ipmi-ip-addr> <ipmi-port> <ipmi-username> <ipmi-password>
+		if [ "${1}" = "--do-ipmitool-cmds" ] ; then
+			MORE_PARAMS="&perform_ipmitool_cmd=yes";
+			shift
+			if [ "${1}" = "--ipmi-defgw" ] ; then
+				MORE_PARAMS="${MORE_PARAMS}&ipmi_default_gw=${2}"
+				shift
+				shift
+			fi
+			if [ "${1}" = "--ipmi-netmask" ] ; then
+				MORE_PARAMS="${MORE_PARAMS}&ipmi_netmask=${2}"
+				shift
+				shift
+			fi
+			if [ "${1}" = "--ipmi-call-chassis-bootdev" ] ; then
+				MORE_PARAMS="${MORE_PARAMS}&ipmi_call_chassis_bootdev=${2}"
+				shift
+				shift
+			fi
+		fi
+		ocicli_call "action=machine_set_ipmi&serial=${1}&ipmi_use=${2}&ipmi_addr=${3}&ipmi_port=${4}&ipmi_username=${5}&ipmi_password=${6}${MORE_PARAMS}"
+		cat ${API_RESPONSE_FILE} | jq -r '.["message"]'
+	;;
+	"machine-console")
+		ocicli_call "action=ipmi_show_cmd_console&serial=${1}"
+		cat ${API_RESPONSE_FILE} | jq -r '.["message"]'
+	;;
+	"location-list")
+		ocicli_location_list
+	;;
+	"location-create")
+		ocicli_call "action=location_create&name=${1}&swiftregion=${2}"
+		ocicli_display_status
+	;;
+	"location-delete")
+		ocicli_call "action=location_delete&name=${1}"  
+		ocicli_display_status
+	;;
+
+	"network-create")
+		ocicli_call "action=new_network&name=${1}&ipaddr=${2}&cidr_mask=${3}&location=${4}&is_public=${5}"
+		ocicli_display_status
+	;;
+	"network-list")
+		ocicli_network_list
+	;;
+	"network-delete")
+		ocicli_call "action=network_delete&name=${1}"
+		ocicli_display_status
+	;;
+	"cluster-set")
+		CALL="action=cluster_set&name=${1}"
+		shift
+		for i in $@ ; do
+			case "${1}" in
+			"--swift-part-power")
+				if [ -z "${2}" ] ; then
+					echo "No parameter for --swift-part-power"
+					usage
+					exit 1
+				fi
+				CALL="${CALL}&swift_part_power=${2}"
+				shift
+				shift
+			;;
+			"--time-server-host")
+				if [ -z "${2}" ] ; then
+					echo "No parameter for --time-server-host"
+					usage
+					exit 1
+				fi
+				CALL="${CALL}&time_server_host=${2}"
+				shift
+				shift
+			;;
+			"--swift-encryption-key-id")
+				if [ -z "${2}" ] ; then
+					echo "No parameter for --swift-encryption-key-id"
+					usage
+					exit 1
+				fi
+				CALL="${CALL}&swift_encryption_key_id=${2}"
+				shift
+				shift
+			;;
+			"--swift-proxy-hostname")
+				if [ -z "${2}" ] ; then
+					echo "No parameter for --swift-proxy-hostname"
+					usage
+					exit 1
+				fi
+				CALL="${CALL}&swift_proxy_hostname=${2}"
+				shift
+				shift
+			;;
+			"--swift-disable-encryption")
+				if [ -z "${2}" ] ; then
+					echo "No parameter for --swift-disable-encryption"
+					usage
+					exit 1
+				fi
+				if [ "${2}" != "yes" ] && [ "${2}" != "no" ] ; then
+					echo "Wrong parameter for --swift-disable-encryption"
+					usage
+					exit 1
+				fi
+				CALL="${CALL}&swift_disable_encryption=${2}"
+				shift
+				shift
+			;;
+			"--amp-secgroup-list")
+				if [ -z "${2}" ] ; then
+					echo "No parameter for --amp-secgroup-list"
+					usage
+					exit 1
+				fi
+				CALL="${CALL}&amp_secgroup_list=${2}"
+				shift
+				shift
+			;;
+			"--amp-boot-network-list")
+				if [ -z "${2}" ] ; then
+					echo "No parameter for --amp-boot-network-list"
+					usage
+					exit 1
+				fi
+				CALL="${CALL}&amp_boot_network_list=${2}"
+				shift
+				shift
+			;;
+			"--disable-notifications")
+				if [ "${2}" != 'yes' ] && [ "${2}" != 'no' ] ; then
+					echo "Paramter for --disable-notifications isn't yes or no"
+					usage
+					exit 1
+				fi
+				CALL="${CALL}&disable_notifications=${2}"
+				shift
+				shift
+			;;
+			"--enable-monitoring-graphs")
+				if [ "${2}" != 'yes' ] && [ "${2}" != 'no' ] ; then
+					echo "Paramter for --disable-notifications isn't yes or no"
+					usage
+					exit 1
+				fi
+				CALL="${CALL}&enable_monitoring_graphs=${2}"
+				shift
+				shift
+			;;
+			"--monitoring-graphite-host")
+				if [ -z "${2}" ] ; then
+					echo "No parameter for --monitoring-graphite-host"
+					usage
+					exit 1
+				fi
+				CALL="${CALL}&monitoring_graphite_host=${2}"
+				shift
+				shift
+			;;
+			"--monitoring-graphite-port")
+				if [ -z "${2}" ] ; then
+					echo "No parameter for --monitoring-graphite-port"
+					usage
+					exit 1
+				fi
+				CALL="${CALL}&monitoring_graphite_port=${2}"
+				shift
+				shift
+			;;
+			*)
+			;;
+			esac
+		done
+		ocicli_call $CALL
+		ocicli_display_status
+	;;
+	"network-set")
+		CALL="action=network_set&network_name=${1}"
+		shift
+		for i in $@ ; do
+			case "${1}" in
+			"--role")
+				if [ -z "${2}" ] ; then
+					echo "No parameter for --role"
+					usage
+					exit 1
+				fi
+				CALL="${CALL}&role=${2}"
+				shift
+				shift
+			;;
+			"--iface1")
+				if [ -z "${2}" ] ; then
+					echo "No parameter for --iface1"
+					usage
+					exit 1
+				fi
+				CALL="${CALL}&iface1_name=${2}"
+				shift
+				shift
+			;;
+			"--iface2")
+				if [ -z "${2}" ] ; then
+					echo "No parameter for --iface2"
+					usage
+					exit 1
+				fi
+				CALL="${CALL}&iface2_name=${2}"
+				shift
+				shift
+			;;
+			"--ip")
+				if [ -z "${2}" ] ; then
+					echo "No parameter for --ip"
+					usage
+					exit 1
+				fi
+				CALL="${CALL}&ip=${2}"
+				shift
+				shift
+			;;
+			"--cidr")
+				if [ -z "${2}" ] ; then
+					echo "No parameter for --cidr"
+					usage
+					exit 1
+				fi
+				CALL="${CALL}&cidr=${2}"
+				shift
+				shift
+			;;
+			"--is-public")
+				if [ -z "${2}" ] ; then
+					echo "No parameter for --is-public"
+					usage
+					exit 1
+				fi
+				CALL="${CALL}&is_public=${2}"
+				shift
+				shift
+			;;
+			"--mtu")
+				if [ -z "${2}" ] ; then
+					echo "No parameter for --mtu"
+					usage
+					exit 1
+				fi
+				CALL="${CALL}&mtu=${2}"
+				shift
+				shift
+			;;
+			"--vlan")
+				if [ -z "${2}" ] ; then
+					echo "No parameter for --vlan"
+					usage
+					exit 1
+				fi
+				CALL="${CALL}&vlan=${2}"
+				shift
+				shift
+			;;
+			"--location")
+				if [ -z "${2}" ] ; then
+					echo "No parameter for --location"
+					usage
+					exit 1
+				fi
+				CALL="${CALL}&location=${2}"
+				shift
+				shift
+			;;
+			"--bridge-name")
+				if [ -z "${2}" ] ; then
+					echo "No parameter for --bridge-name"
+					usage
+					exit 1
+				fi
+				CALL="${CALL}&bridgename=${2}"
+				shift
+				shift
+			;;
+			*)
+			;;
+			esac
+		done
+		ocicli_call $CALL
+		ocicli_display_status
+	;;
+	# Add a network to a cluster
+	"network-add")
+		ocicli_call "action=network_add&network_name=${1}&cluster_name=${2}&role_name=${3}&iface1=${4}&iface2=${5}"
+		ocicli_display_status
+	;;
+	# Remove a network from a cluster
+	"network-remove")
+		ocicli_call "action=network_remove&network_name=${1}"
+		ocicli_display_status
+	;;
+
+	"cluster-list")
+		ocicli_cluster_list
+	;;
+	"cluster-create")
+		ocicli_call "action=cluster_create&name=${1}&domain=${2}"
+		ocicli_display_status
+	;;
+	"cluster-delete")
+		ocicli_call "action=cluster_delete&name=${1}"
+		ocicli_display_status
+	;;
+	"cluster-show")
+		ocicli_cluster_show ${1}
+	;;
+	"cluster-show-networks")
+		ocicli_cluster_show_networks $@
+	;;
+	"cluster-show-machines")
+		ocicli_cluster_show_machines $@
+	;;
+	"cluster-show-ips")
+		ocicli_call "action=cluster_show_ips&name=${1}"
+		echo "hostname,ip"
+		cat ${API_RESPONSE_FILE} | jq -r '.["data"]|=sort_by(.hostname)|.["data"][] | "\(.hostname),\(.ipaddr)"'
+	;;
+
+	"swift-region-list")
+		ocicli_swiftregion_list
+	;;
+	"swift-region-create")
+		ocicli_call "action=swiftregion_create&name=${1}"
+		ocicli_display_status
+	;;
+	"swift-region-delete")
+		ocicli_call "action=swiftregion_delete&name=${1}"
+		ocicli_display_status
+	;;
+	"swift-calculate-ring")
+		ocicli_call "action=swift_caculate_ring&cluster_name=${1}"
+		echo "Output for the job:"
+		cat ${API_RESPONSE_FILE} | jq -r '.["data"]'
+	;;
+	"role-list")
+		ocicli_role_list
+	;;
+	"role-create")
+		ocicli_call "action=role_create&name=${1}"
+		ocicli_display_status
+	;;
+	"role-delete")
+		ocicli_call "action=role_delete&name=${1}"
+		ocicli_display_status
+	;;
+	*)
+		usage
+	;;
+esac

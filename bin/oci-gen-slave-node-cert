@@ -1,0 +1,51 @@
+#!/bin/sh
+
+set -e
+
+PKI_CONFIG_ROOT=/etc/openstack-cluster-installer/pki
+CLIENT_KEYS_FOLDER=/var/lib/oci/ssl
+PUPPET_MASTER_HOSTNAME=$(hostname --fqdn)
+
+# This script was made using http://pki-tutorial.readthedocs.io/en/latest/expert/index.html
+
+SLAVE_NODE_HOSTNAME=${1}
+
+if [ -z "${SLAVE_NODE_HOSTNAME}" ] ; then
+	echo "This script needs one hostname as parameter."
+	exit 1
+fi
+
+for i in $(echo ${SLAVE_NODE_HOSTNAME} | sed -e 's/[.]/ /g') ; do
+	if echo ${i} | grep -E -q "^(xn--)?[a-z0-9][a-z0-9-]{0,61}[a-z0-9]{0,1}\$" ; then
+		echo ""
+	else
+		echo "Not validated"
+		exit 1
+	fi
+done
+
+TARGET_DIR=${CLIENT_KEYS_FOLDER}/slave-nodes/${SLAVE_NODE_HOSTNAME}
+
+mkdir -p ${TARGET_DIR}
+cd ${TARGET_DIR}
+
+# 6. Operate Component CA
+# 6.1 Create TLS server request for ${SLAVE_NODE_HOSTNAME}
+SAN=DNS:${PUPPET_MASTER_HOSTNAME} \
+openssl req -new \
+    -config ${PKI_CONFIG_ROOT}/server.conf \
+    -out ${TARGET_DIR}/${SLAVE_NODE_HOSTNAME}.csr \
+    -keyout ${TARGET_DIR}/${SLAVE_NODE_HOSTNAME}.key \
+    -subj "/C=CH/ST=Geneva/L=Carouge/O=OCI/OU=Production/CN=${SLAVE_NODE_HOSTNAME}/emailAddress=production@infomaniak.com/subjectAltName=${SLAVE_NODE_HOSTNAME}"
+
+# 6.2 Create TLS server certificate for ${SLAVE_NODE_HOSTNAME}
+(echo "y"; echo "y") | \
+openssl ca \
+    -config ${PKI_CONFIG_ROOT}/oci-ca.conf \
+    -in ${TARGET_DIR}/${SLAVE_NODE_HOSTNAME}.csr \
+    -out ${TARGET_DIR}/${SLAVE_NODE_HOSTNAME}.crt
+
+cat ${TARGET_DIR}/${SLAVE_NODE_HOSTNAME}.crt ${TARGET_DIR}/${SLAVE_NODE_HOSTNAME}.key >${TARGET_DIR}/${SLAVE_NODE_HOSTNAME}.pem
+
+# chown the files so that the web interface can read them
+chown -R www-data:www-data ${TARGET_DIR}

@@ -1,0 +1,133 @@
+#!/bin/sh
+
+. /usr/share/openstack-pkg-tools/pkgos_func
+
+set -e
+set -x
+
+# Set to either flat or vlan
+OCTAVIA_NETWORK_TYPE=flat
+# Set to the ID of the Octavia VLAN if the above is set to vlan
+OCTAVIA_NETWORK_VLAN=876
+# Set this to a value that matches something listed in /etc/neutron/plugins/ml2/ml2_conf.ini
+# either in [ml2_type_flat]/flat_networks or in [ml2_type_vlan]/network_vlan_ranges
+OCTAVIA_PHYSNET_NAME=external1
+
+OCTAVIA_SUBNET_RANGE=192.168.104.0/24
+OCTAVIA_SUBNET_START=192.168.104.4
+OCTAVIA_SUBNET_END=192.168.104.250
+OCTAVIA_SUBNET_GW=192.168.104.1
+OCTAVIA_SUBNET_DNS1=84.16.67.69
+OCTAVIA_SUBNET_DNS2=84.16.67.70
+
+if ! dpkg-query -W openstack-debian-images ; then
+	apt-get install openstack-debian-images -y
+fi
+
+if ! dpkg-query -W openstack-pkg-tools ; then
+	apt-get install openstack-pkg-tools -y
+fi
+
+##############################
+### AMPHORA IMAGE CREATION ###
+##############################
+### Create the Amphora image if it doesn't exist
+if ! ls debian-buster-octavia-amphora-*-amd64.qcow2 2>/dev/null ; then
+	echo "===> Building image..."
+	/usr/share/doc/openstack-debian-images/examples/octavia/amphora-build
+fi
+AMPHORA_IMAGE_FILE=$(ls debian-buster-octavia-amphora-*-amd64.qcow2)
+
+### Upload the image if it isn't present in Glance
+. /root/oci-openrc
+AMPHORA_IMAGE_ID=$(openstack image list --tag amphora -f value -c ID 2>/dev/null)
+if [ -z "${AMPHORA_IMAGE_ID}" ] ; then
+	openstack image create --container-format bare --disk-format qcow2 --file "${AMPHORA_IMAGE_FILE}" --tag amphora "${AMPHORA_IMAGE_FILE}"
+	AMPHORA_IMAGE_ID=$(openstack image list --tag amphora -f value -c ID 2>/dev/null)
+fi
+
+#######################
+### SECURITY GROUPS ###
+#######################
+### Create the security groups
+. /root/octavia-openrc
+LB_MGMT_SEC_GRP=$(openstack security group show lb-mgmt-sec-grp -f value -c id 2>/dev/null || true)
+if [ -z "${LB_MGMT_SEC_GRP}" ] ; then
+	openstack security group create lb-mgmt-sec-grp
+	openstack security group rule create --protocol icmp lb-mgmt-sec-grp
+	openstack security group rule create --protocol tcp --dst-port 22 lb-mgmt-sec-grp
+	openstack security group rule create --protocol tcp --dst-port 9443 lb-mgmt-sec-grp
+	openstack security group rule create --protocol icmpv6 --ethertype IPv6 --remote-ip ::/0 lb-mgmt-sec-grp
+	openstack security group rule create --protocol tcp --dst-port 22 --ethertype IPv6 --remote-ip ::/0 lb-mgmt-sec-grp
+	openstack security group rule create --protocol tcp --dst-port 9443 --ethertype IPv6 --remote-ip ::/0 lb-mgmt-sec-grp
+	LB_MGMT_SEC_GRP=$(openstack security group show lb-mgmt-sec-grp -f value -c id 2>/dev/null)
+fi
+
+LB_HEALTH_MGR_SEC_GRP=$(openstack security group show lb-health-mgr-sec-grp -f value -c id 2>/dev/null || true)
+if [ -z "${LB_HEALTH_MGR_SEC_GRP}" ] ; then
+	openstack security group create lb-health-mgr-sec-grp
+	openstack security group rule create --protocol udp --dst-port 5555 lb-health-mgr-sec-grp
+	openstack security group rule create --protocol udp --dst-port 5555 --ethertype IPv6 --remote-ip ::/0 lb-health-mgr-sec-grp
+	LB_HEALTH_MGR_SEC_GRP=$(openstack security group show lb-health-mgr-sec-grp -f value -c id 2>/dev/null)
+fi
+
+### Make sure we have the correct security groups in octavia.conf
+pkgos_inifile set /etc/octavia/octavia.conf controller_worker amp_secgroup_list "${LB_MGMT_SEC_GRP},${LB_HEALTH_MGR_SEC_GRP}"
+
+###########################
+### OCTAVIA SSH KEYPAIR ###
+###########################
+mkdir -p /etc/octavia/.ssh
+if ! [ -e /etc/octavia/.ssh/octavia_ssh_key ] ; then
+	ssh-keygen -t rsa -f /etc/octavia/.ssh/octavia_ssh_key -P ""
+	chown -R octavia:octavia /etc/octavia/.ssh
+fi
+
+. /root/octavia-openrc
+KEYPAIR=$(openstack keypair list -f value -c Name 2>/dev/null)
+if [ -z "${KEYPAIR}" ] ; then
+	openstack keypair create --public-key /etc/octavia/.ssh/octavia_ssh_key.pub octavia-ssh-key
+fi
+
+####################
+### OCTAVIA ROLE ###
+####################
+### Create the role as admin
+. /root/oci-openrc
+
+OCTAVIA_ROLE=$(openstack role show load-balancer_admin -f value -c id 2>/dev/null || true)
+if [ -z "${OCTAVIA_ROLE}" ] ; then
+	openstack role create load-balancer_admin
+	OCTAVIA_ROLE=$(openstack role show load-balancer_admin -f value -c id 2>/dev/null)
+fi
+
+### Make sure it is assigned to the admin user
+ROLE_ASSIGNMENT=$(openstack role assignment list --user admin --project admin --role load-balancer_admin -f value -c Role 2>/dev/null || true)
+if [ -z "${ROLE_ASSIGNMENT}" ] ; then
+	openstack role add --project admin --user admin load-balancer_admin
+fi
+
+############################
+### LOADBALANCER NETWORK ###
+############################
+### Create the network
+LB_MGMT_NET=$(openstack network list --name lb-mgmt-net -f value -c ID 2>/dev/null || true)
+if [ -z "${LB_MGMT_NET}" ] ; then
+	if [ "${OCTAVIA_NETWORK_TYPE}" = "flat" ] ; then
+		openstack network create --external --provider-physical-network ${OCTAVIA_PHYSNET_NAME} --provider-network-type flat lb-mgmt-net
+	else
+		openstack network create --external --provider-physical-network external --provider-network-type vlan --provider-segment "${OCTAVIA_NETWORK_VLAN}" lb-mgmt-net
+	fi
+	LB_MGMT_NET=$(openstack network list --name lb-mgmt-net -f value -c ID 2>/dev/null)
+fi
+### Create the subnet
+LB_MGMT_SUBNET=$(openstack subnet list --name lb-mgmt-subnet -f value -c ID 2>/dev/null || true)
+if [ -z "${LB_MGMT_SUBNET}" ] ; then
+	openstack subnet create --network lb-mgmt-net \
+		--allocation-pool start=${OCTAVIA_SUBNET_START},end=${OCTAVIA_SUBNET_END} --subnet-range ${OCTAVIA_SUBNET_RANGE} --gateway ${OCTAVIA_SUBNET_GW} \
+		--dns-nameserver ${OCTAVIA_SUBNET_DNS1} --dns-nameserver ${OCTAVIA_SUBNET_DNS2} lb-mgmt-subnet
+	LB_MGMT_SUBNET=$(openstack subnet list --name lb-mgmt-subnet -f value -c ID 2>/dev/null)
+fi
+
+### Make sure we have the correct network ID in octavia.conf
+pkgos_inifile set /etc/octavia/octavia.conf controller_worker amp_boot_network_list ${LB_MGMT_NET}

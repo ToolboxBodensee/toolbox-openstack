@@ -1,0 +1,44 @@
+#!/bin/sh
+
+set -e
+set -x
+
+if [ -z "${1}" ] ; then
+	echo "usage: $0 <first-node-hostname>"
+	exit 1
+fi
+
+
+MY_HOSTNAME=$(hostname -s)
+CLUSTER_NAME=$(echo ${1} | cut -d. -f1)
+
+
+if [ "${MY_HOSTNAME}" = "${CLUSTER_NAME}" ] ; then
+	echo "Running: rabbitmqctl set_policy HA"
+	rabbitmqctl set_policy HA '^(?!amq\.).*' '{"ha-mode": "all"}'
+
+	echo "Setting important rabbit parameters"
+	rabbitmqctl set_vm_memory_high_watermark 0.7
+	rabbitmqctl eval 'application:set_env(rabbit, cluster_partition_handling, autoheal).'
+	rabbitmqctl eval 'application:set_env(rabbit, collect_statistics_interval, 60000).'
+	echo "I'm first master, let's do nothing..."
+	exit 0
+fi
+
+if ! rabbitmqctl cluster_status | grep -q ${CLUSTER_NAME} ; then
+	echo "Not in cluster: joining cluster ${CLUSTER_NAME}"
+	rabbitmqctl stop_app
+	rabbitmqctl join_cluster rabbit@${CLUSTER_NAME}
+	sleep 5
+	rabbitmqctl start_app
+else
+	echo "In cluster already"
+fi
+
+echo "Running: rabbitmqctl set_policy HA"
+rabbitmqctl set_policy HA '^(?!amq\.).*' '{"ha-mode": "all"}'
+
+echo "Setting important rabbit parameters"
+rabbitmqctl set_vm_memory_high_watermark 0.7
+rabbitmqctl eval 'application:set_env(rabbit, cluster_partition_handling, autoheal).'
+rabbitmqctl eval 'application:set_env(rabbit, collect_statistics_interval, 60000).'

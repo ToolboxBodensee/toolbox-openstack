@@ -1,0 +1,24 @@
+#!/bin/sh
+
+set -e
+
+TMPFILE=$(mktemp -t puppet-oci-enc.XXXXXX)
+
+HOSTNAME=${1}
+
+# Fetch ENC from web server
+curl -s "http://localhost/oci/api.php?action=enc&hostname=${HOSTNAME}" >${TMPFILE}
+
+# Check the status
+SUCCESS=$(cat ${TMPFILE} | jq --raw-output '.["status"]')
+if ! [ "${SUCCESS}" = "success" ] ; then
+	exit 1
+fi
+
+# Output result
+cat ${TMPFILE} | jq --raw-output '.["data"]'
+
+rm ${TMPFILE}
+
+# Great success!
+exit 0

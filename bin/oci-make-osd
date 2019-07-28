@@ -1,0 +1,341 @@
+#!/bin/sh
+
+set -ex
+
+#####################
+### PARAM PARSING ###
+#####################
+SEPARATE_WAL_AND_ROCKSDB=no
+if [ "${i}" = "--separate-wal-and-rocksdb" ]; then
+	SEPARATE_WAL_AND_ROCKSDB=yes
+	shift
+fi
+
+HDD_DEV=${1}
+shift
+
+if [ -n "${1}" ] ; then
+	CLUSTER_ADDR=${1}
+	shift
+fi
+
+# Guess some facts:
+# - cephosd node number
+# - drive letter
+# - OSD id
+# - OSD port number
+MAJOR_NUM=$(hostname -s | sed 's#[a-z0-9]*-cephosd-##')
+if echo ${HDD_DEV} | grep -q nvme ; then
+	NVME_DRIVE_NUM=$(echo ${HDD_DEV} | sed sed -e s/nvme// -e s/n1//)
+	# We add 1 to avoid issue when nvme0n1
+	ID=$(( ${NVME_DRIVE_NUM} + 1 ))
+	if [ ${ID} -le 9 ] ; then
+		CEPH_OSD_ID=${MAJOR_NUM}0${ID}
+	else
+		CEPH_OSD_ID=${MAJOR_NUM}${ID}
+	fi
+	PORT=$(( ${ID} * 3 ))
+	if [ ${PORT} -le 9 ] ; then
+		CEPH_OSD_PORT=680${PORT}
+	else
+		CEPH_OSD_PORT=68${PORT}
+	fi
+else
+	DRIVE_LETTER=$(echo ${HDD_DEV} | sed 's#[sv]d##')
+	case "${DRIVE_LETTER}" in
+	a)
+		CEPH_OSD_ID=${MAJOR_NUM}01
+		CEPH_OSD_PORT=6803
+		;;
+	b)
+		CEPH_OSD_ID=${MAJOR_NUM}02
+		CEPH_OSD_PORT=6806
+		;;
+	c)
+		CEPH_OSD_ID=${MAJOR_NUM}03
+		CEPH_OSD_PORT=6809
+		;;
+	d)
+		CEPH_OSD_ID=${MAJOR_NUM}04
+		CEPH_OSD_PORT=6812
+		;;
+	e)
+		CEPH_OSD_ID=${MAJOR_NUM}05
+		CEPH_OSD_PORT=6815
+		;;
+	f)
+		CEPH_OSD_ID=${MAJOR_NUM}06
+		CEPH_OSD_PORT=6818
+		;;
+	g)
+		CEPH_OSD_ID=${MAJOR_NUM}07
+		CEPH_OSD_PORT=6821
+		;;
+	h)
+		CEPH_OSD_ID=${MAJOR_NUM}08
+		CEPH_OSD_PORT=6824
+		;;
+	i)
+		CEPH_OSD_ID=${MAJOR_NUM}09
+		CEPH_OSD_PORT=6827
+		;;
+	j)
+		CEPH_OSD_ID=${MAJOR_NUM}10
+		CEPH_OSD_PORT=6830
+		;;
+	k)
+		CEPH_OSD_ID=${MAJOR_NUM}11
+		CEPH_OSD_PORT=6833
+		;;
+	l)
+		CEPH_OSD_ID=${MAJOR_NUM}12
+		CEPH_OSD_PORT=6836
+		;;
+	m)
+		CEPH_OSD_ID=${MAJOR_NUM}13
+		CEPH_OSD_PORT=6839
+		;;
+	n)
+		CEPH_OSD_ID=${MAJOR_NUM}14
+		CEPH_OSD_PORT=6842
+		;;
+	o)
+		CEPH_OSD_ID=${MAJOR_NUM}15
+		CEPH_OSD_PORT=6845
+		;;
+	p)
+		CEPH_OSD_ID=${MAJOR_NUM}16
+		CEPH_OSD_PORT=6848
+		;;
+	q)
+		CEPH_OSD_ID=${MAJOR_NUM}17
+		CEPH_OSD_PORT=6851
+		;;
+	r)
+		CEPH_OSD_ID=${MAJOR_NUM}18
+		CEPH_OSD_PORT=6854
+		;;
+	s)
+		CEPH_OSD_ID=${MAJOR_NUM}19
+		CEPH_OSD_PORT=6857
+		;;
+	t)
+		CEPH_OSD_ID=${MAJOR_NUM}20
+		CEPH_OSD_PORT=6860
+		;;
+	u)
+		CEPH_OSD_ID=${MAJOR_NUM}21
+		CEPH_OSD_PORT=6863
+		;;
+	v)
+		CEPH_OSD_ID=${MAJOR_NUM}22
+		CEPH_OSD_PORT=6866
+		;;
+	w)
+		CEPH_OSD_ID=${MAJOR_NUM}23
+		CEPH_OSD_PORT=6869
+		;;
+	x)
+		CEPH_OSD_ID=${MAJOR_NUM}24
+		CEPH_OSD_PORT=6872
+		;;
+	y)
+		CEPH_OSD_ID=${MAJOR_NUM}25
+		CEPH_OSD_PORT=6875
+		;;
+	z)
+		CEPH_OSD_ID=${MAJOR_NUM}26
+		CEPH_OSD_PORT=6878
+		;;
+	esac
+fi
+MOUNT_POINT=/var/lib/ceph/osd/ceph-${CEPH_OSD_ID}
+
+##############################
+### Prepare the whole disk ###
+##############################
+# Make sure the drive exists
+if ! [ -e /dev/${HDD_DEV} ] ; then
+	echo "$0 could not find /dev/${HDD_DEV}: exiting"
+	exit 1
+fi
+# ...and that it has a gpt header
+if ! blkid /dev/${HDD_DEV} | grep -q gpt ; then
+	parted -s /dev/${HDD_DEV} mktable gpt
+	parted -s -a optimal /dev/${HDD_DEV} mkpart primary 1Mi 100%
+fi
+
+if echo ${HDD_DEV} | grep -q nvme ; then
+	PART_DEV=${HDD_DEV}p1
+else
+	PART_DEV=${HDD_DEV}1
+fi
+
+# ...and that it has PVs
+if ! pvs | grep -q /dev/${PART_DEV} ; then
+	pvcreate -f /dev/${PART_DEV}
+fi
+# ...and that it has a volume group
+if ! pvs | grep -q osdvg${CEPH_OSD_ID} ; then
+	vgcreate osdvg${CEPH_OSD_ID} /dev/${PART_DEV}
+	vgchange -a y osdvg${CEPH_OSD_ID}
+fi
+
+# Get the size of the PVs, calculate WAL and RocksDB size
+# round them up to 2048 bytes and make sure they are at least 1 GB
+if [ "${SEPARATE_WAL_AND_ROCKSDB}" = "yes" ] ; then
+	PV_SIZE=$(pvdisplay --units b -s /dev/${PART_DEV} | awk '{print $7}')
+	WAL_SIZE=$((${PV_SIZE} / 1000))
+	WAL_SIZE=$(($((${WAL_SIZE} / 2048)) * 2048))
+	WAL_MIN_SIZE=$((1024 * 1024 * 1024))
+
+	ROCKSDB_SIZE=$((${PV_SIZE} / 2000))
+	ROCKSDB_SIZE=$(($((${ROCKSDB_SIZE} / 2048)) * 2048))
+	ROCKSDB_MIN_SIZE=$((1024 * 1024 * 1024))
+
+	if [ ${WAL_SIZE} -lt ${WAL_MIN_SIZE} ] ; then
+		WAL_SIZE=${WAL_MIN_SIZE}
+	fi
+	if [ ${ROCKSDB_SIZE} -lt ${ROCKSDB_MIN_SIZE} ] ; then
+		ROCKSDB_SIZE=${ROCKSDB_MIN_SIZE}
+	fi
+fi
+
+##################################
+### Prepare the conf partition ###
+##################################
+# Create the 200 config partition
+if ! lvs | grep -q conf${CEPH_OSD_ID} ; then
+	lvcreate -L200M -nconf${CEPH_OSD_ID} osdvg${CEPH_OSD_ID}
+fi
+# ... and xfs format it
+if ! blkid /dev/osdvg${CEPH_OSD_ID}/conf${CEPH_OSD_ID} ; then
+	mkfs.xfs -f /dev/osdvg${CEPH_OSD_ID}/conf${CEPH_OSD_ID}
+fi
+# ... and get its UUID
+HDD_UUID=$(blkid -o value -s UUID /dev/osdvg${CEPH_OSD_ID}/conf${CEPH_OSD_ID})
+# ... and make sure it's mounted
+if ! grep -q ${HDD_UUID} /etc/fstab ; then
+	su ceph -s /bin/sh -c "mkdir -p ${MOUNT_POINT}"
+	echo "UUID=${HDD_UUID} ${MOUNT_POINT} xfs noatime,nodiratime,logbufs=8 0 0" >> /etc/fstab
+	mount ${MOUNT_POINT}
+fi
+
+####################################################
+### Prepare the WAL and RocksDB and data devices ###
+####################################################
+if [ "${SEPARATE_WAL_AND_ROCKSDB}" = "yes" ] ; then
+	# Create the Write-Ahead-Log (WAL) device
+	if ! lvs | grep -q wal${CEPH_OSD_ID} ; then
+		lvcreate -L${WAL_SIZE}b -nwal${CEPH_OSD_ID} osdvg${CEPH_OSD_ID}
+	fi
+
+	# Create the RocksDB device
+	if ! lvs | grep -q rdb${CEPH_OSD_ID} ; then
+		lvcreate -L${ROCKSDB_SIZE}b -nrdb${CEPH_OSD_ID} osdvg${CEPH_OSD_ID}
+	fi
+fi
+
+# Calculate remaining space on the VG
+FREE_ON_VG=$(vgs --separator , osdvg${CEPH_OSD_ID} | q -d, -H "SELECT VFree FROM - WHERE VG='osdvg${CEPH_OSD_ID}'")
+
+# Create the data device
+if ! lvs | grep -q data${CEPH_OSD_ID} ; then
+	lvcreate -L${FREE_ON_VG} -ndata${CEPH_OSD_ID} osdvg${CEPH_OSD_ID}
+fi
+
+# Make sure Ceph has access to disks
+adduser ceph disk || true
+
+#############################################################
+### Prepare ceph.conf to include IP and port for this OSD ###
+#############################################################
+DEFROUTE_IF=`awk '{ if ( $2 == "00000000" ) print $1 }' /proc/net/route`
+if [ -n "${DEFROUTE_IF}" ] ; then
+	if [ -x /bin/ip ] ; then
+		DEFROUTE_IP=`LC_ALL=C ip addr show "${DEFROUTE_IF}" | grep inet | head -n 1 | awk '{print $2}' | cut -d/ -f1 | grep -E '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$'`
+	else
+		DEFROUTE_IP=`hostname -i | grep -E '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$'`
+	fi
+fi
+
+if [ -z "${CLUSTER_ADDR}" ] ; then
+	CLUSTER_ADDR=${DEFROUTE_IP}
+fi
+
+# Check if the OSD is in ceph.conf
+if ! grep -q "osd.${CEPH_OSD_ID}" /etc/ceph/ceph.conf ; then
+	echo "[osd.${CEPH_OSD_ID}]
+public_addr = ${DEFROUTE_IP}:${CEPH_OSD_PORT}
+cluster_addr = ${CLUSTER_ADDR}
+" >>/etc/ceph/ceph.conf
+fi
+
+chown ceph:ceph ${MOUNT_POINT}
+
+# Create a fsid if it doesn't exist, otherwise load it
+if [ -r ${MOUNT_POINT}/fsid ] ; then
+	UUID=$(cat /var/lib/ceph/osd/ceph-${CEPH_OSD_ID}/fsid)
+else
+	UUID=$(uuidgen)
+	su ceph -s /bin/sh -c "echo ${UUID} >${MOUNT_POINT}/fsid"
+fi
+
+# Make sure we have the correct attributes inside the store
+# Frist, declare we're using bluestore
+if ! [ -e ${MOUNT_POINT}/type ] ; then
+	su ceph -s /bin/sh -c "echo bluestore >${MOUNT_POINT}/type"
+fi
+chown ceph:ceph ${MOUNT_POINT}/type
+
+# Declare the data device
+if ! [ -L ${MOUNT_POINT}/block ] ; then
+	su ceph -s /bin/sh -c "ln -s /dev/osdvg${CEPH_OSD_ID}/data${CEPH_OSD_ID} ${MOUNT_POINT}/block"
+fi
+chown --no-dereference ceph:ceph ${MOUNT_POINT}/block
+
+if [ "${SEPARATE_WAL_AND_ROCKSDB}" = "yes" ] ; then
+	# ... then the Write-Ahead-Log (WAL) device
+	if ! [ -L ${MOUNT_POINT}/block.wal ] ; then
+		su ceph -s /bin/sh -c "ln -s /dev/osdvg${CEPH_OSD_ID}/wal${CEPH_OSD_ID} ${MOUNT_POINT}/block.wal"
+	fi
+	chown --no-dereference ceph:ceph ${MOUNT_POINT}/block.wal
+
+	# ... then the RocksDB device
+	if ! [ -L ${MOUNT_POINT}/block.db ] ; then
+		su ceph -s /bin/sh -c "ln -s /dev/osdvg${CEPH_OSD_ID}/rdb${CEPH_OSD_ID} ${MOUNT_POINT}/block.db"
+	fi
+	chown --no-dereference ceph:ceph ${MOUNT_POINT}/block.db
+fi
+
+chown ceph:ceph --no-dereference /dev/osdvg${CEPH_OSD_ID}/*
+chown ceph:disk /dev/dm-*
+
+# Run ceph osd new
+if ! [ -e ${MOUNT_POINT}/oci_ceph_osd_new_done ] ; then
+	OSD_SECRET=$(ceph-authtool --gen-print-key)
+	echo "{\"cephx_secret\": \"$OSD_SECRET\"}" | ceph osd new ${UUID} ${CEPH_OSD_ID} -i - -n client.bootstrap-osd -k /var/lib/ceph/bootstrap-osd/ceph.keyring
+	su ceph -s /bin/sh -c "echo '' >${MOUNT_POINT}/oci_ceph_osd_new_done"
+fi
+# Create the keyring file
+if ! [ -e ${MOUNT_POINT}/keyring ] ; then
+	# Create the OSD keyring file
+	ceph-authtool --create-keyring ${MOUNT_POINT}/keyring --name osd.${CEPH_OSD_ID} --add-key ${OSD_SECRET}
+	chown ceph:ceph ${MOUNT_POINT}/keyring
+fi
+# Create the OSD on the config file (ie: ceph-osd --mkfs)
+if ! [ -r ${MOUNT_POINT}/bluefs ] ; then
+	ceph-osd --setuser ceph -i ${CEPH_OSD_ID} --mkfs --osd-uuid $UUID
+	chown -R ceph:ceph ${MOUNT_POINT}
+fi
+
+# Make sure the systemd service matching the OSD exists.
+if ! [ -L /etc/systemd/system/ceph-osd.target.wants/ceph-osd@${CEPH_OSD_ID}.service ] ; then
+	systemctl enable ceph-osd@${CEPH_OSD_ID}
+fi
+# Start the service.
+systemctl start ceph-osd@${CEPH_OSD_ID}
+
+# Wait 5 seconds to allow settling-up of CEPH
+echo "Waiting 5 seconds to settle-up before next run..."
+sleep 5

@@ -1,0 +1,296 @@
+#bash completion for ocicli
+
+_ocicli() {
+	local cur prev cmd_name
+	COMPREPLY=()
+	cur="${COMP_WORDS[COMP_CWORD]}"
+	prev="${COMP_WORDS[COMP_CWORD-1]}"
+	cmd_name="${COMP_WORDS[1]}"
+
+	opts="machine-list machine-console machine-show machine-set machine-add machine-remove machine-destroy machine-reboot-on-hdd machine-reboot-on-live machine-ipmi-reboot-on-hdd machine-ipmi-reboot-on-live machine-install-os machine-display-install-cmd machine-install-log machine-set-ipmi location-list location-create location-delete network-create network-list network-delete network-add network-remove network-set cluster-list cluster-create cluster-delete cluster-set cluster-show cluster-show-networks cluster-show-machines cluster-show-ips swift-region-list swift-region-create swift-region-delete swift-calculate-ring role-list role-create role-delete"
+	iface_names="none eth0 eth1 eth2 eth3 eth4 eth5 10m1 10m2 10m3 10m4 100m1 100m2 100m3 100m4 1g1 1g2 1g3 1g4 10g1 10g2 10g3 10g4"
+
+	case "${cmd_name}" in
+	machine-show|machine-destroy|machine-reboot-on-hdd|machine-reboot-on-live|machine-ipmi-reboot-on-hdd|machine-ipmi-reboot-on-live|machine-set-ipmi)
+		local serial_list=$(ocicli -csv machine-list | grep -v "serial,Cur_ip,memory,status,lastseen,cluster,ladvd,product_name,BIOSver,IPMIver,IPMI_IP,hostname,notes" | cut -d, -f1 | tr \\n " ")
+		COMPREPLY=( $(compgen -W "${serial_list}" -- ${cur}) )
+		return 0
+	;;
+	machine-install-os|machine-display-install-cmd)
+		case ${COMP_CWORD} in
+		2)
+			local serial_list=$(ocicli -csv machine-list | q -d, -H "SELECT serial FROM - WHERE cluster NOT LIKE 'null' AND status='live'" | tr \\n " ")
+			COMPREPLY=( $(compgen -W "${serial_list}" -- ${cur}) )
+			return 0
+		;;
+		*)
+			return 0
+		;;
+		esac
+	;;
+	machine-install-log)
+		case ${COMP_CWORD} in
+		2)
+			local serial_list=$(ocicli -csv machine-list | q -d, -H "SELECT serial FROM - WHERE cluster NOT LIKE 'null' AND status='installing'" | tr \\n " ")
+			COMPREPLY=( $(compgen -W "${serial_list}" -- ${cur}) )
+			return 0
+		;;
+		*)
+			return 0
+		;;
+		esac
+	;;
+	machine-console)
+		case ${COMP_CWORD} in
+		2)
+			local serial_list=$(ocicli -csv machine-list | q -d, -H "SELECT serial FROM -" | tr \\n " ")
+			COMPREPLY=( $(compgen -W "${serial_list}" -- ${cur}) )
+			return 0
+		;;
+		*)
+			return 0
+		;;
+		esac
+	;;
+	machine-remove)
+		case ${COMP_CWORD} in
+		2)
+			local serial_list=$(ocicli -csv machine-list | q -d, -H "SELECT serial FROM - WHERE cluster NOT LIKE 'null'" | tr \\n " ")
+			COMPREPLY=( $(compgen -W "${serial_list}" -- ${cur}) )
+			return 0
+		;;
+		*)
+			return 0
+		;;
+		esac
+	;;
+	machine-set)
+		case ${COMP_CWORD} in
+		2)
+			local serial_list=$(ocicli -csv machine-list | grep -v "serial,Cur_ip,memory,status,lastseen,cluster,ladvd,product_name,BIOSver,IPMIver,IPMI_IP,hostname,notes" | cut -d, -f1 | tr \\n " ")
+			COMPREPLY=( $(compgen -W "${serial_list}" -- ${cur}) )
+			return 0
+		;;
+		3|5|7|9|11|13|15|17|19|21|23|25|27)
+			COMPREPLY=( $(compgen -W "--use_ceph_if_available --install-on-raid --raid-type --raid-dev0 --raid-dev1 --raid-dev2 --raid-dev3 --raid-dev4 --serial-console-device --dc --row --rack --ustart --uend" -- ${cur}) )
+			return 0
+		;;
+		4|6|8|10|12|14|16|18|20|22|24|26|28)
+			case "${prev}" in
+                        "--use_ceph_if_available"|"--install-on-raid")
+				COMPREPLY=( $(compgen -W "yes no" -- ${cur}) )
+				return 0
+			;;
+			"--raid-type")
+				COMPREPLY=( $(compgen -W "0 1 10" -- ${cur}) )
+				return 0
+			;;
+			"--raid-dev0"|"--raid-dev1"|"--raid-dev2"|"--raid-dev3")
+				COMPREPLY=( $(compgen -W "sda sdb sdc sdd sde sdf sdg sdh sdi sdj sdk sdl sdm sdn sdo sdp vda vdb vdc vdd vde vdf vdg vdh" -- ${cur}) )
+				return 0
+			;;
+			"--serial-console-device")
+				COMPREPLY=( $(compgen -W "ttyS0 ttyS1 ttyS2 ttyS4 none" -- ${cur}) )
+				return 0
+			;;
+			*)
+				return 0
+			;;
+			esac
+		;;
+		*)
+			return 0
+		;;
+		esac
+	;;
+	machine-add)
+		case ${COMP_CWORD} in
+		2)
+			local serial_list=$(ocicli -csv machine-list | q -d, -H "SELECT serial FROM - WHERE cluster='null'" | tr \\n " ")
+			COMPREPLY=( $(compgen -W "${serial_list}" -- ${cur}) )
+			return 0
+		;;
+		3)
+			local cluster_list=$(ocicli -csv cluster-list | grep -v "id,name,domain" | cut -d, -f2 | tr \\n " ")
+			COMPREPLY=( $(compgen -W "${cluster_list}" -- ${cur}) )
+			return 0
+		;;
+		4)
+			local role_list=$(ocicli -csv role-list | grep -v "id,name" | cut -d, -f2 | tr \\n " ")
+			COMPREPLY=( $(compgen -W "${role_list}" -- ${cur}) )
+			return 0
+		;;
+		5)
+			local location_list=$(ocicli -csv location-list | grep -v "id,name,swiftregion" | cut -d, -f2 | tr \\n " ")
+			COMPREPLY=( $(compgen -W "${location_list}" -- ${cur}) )
+			return 0
+		;;
+		*)
+			return 0
+		;;
+		esac
+	;;
+	cluster-set)
+		case ${COMP_CWORD} in
+		2)
+			local cluster_list=$(ocicli -csv cluster-list | grep -v "id,name,domain" | cut -d, -f2 | tr \\n " ")
+			COMPREPLY=( $(compgen -W "${cluster_list}" -- ${cur}) )
+			return 0
+		;;
+		3|5|7|9|11|13|15|17|19|21|23)
+			COMPREPLY=( $(compgen -W "--time-server-host --swift-part-power --swift-proxy-hostname --swift-encryption-key-id --swift-disable-encryption --amp-secgroup-list --amp-boot-network-list --disable-notifications --enable-monitoring-graphs --monitoring-graphite-host --monitoring-graphite-port" -- ${cur}) )
+			return 0
+		;;
+		4|6|8|10|12|14|16|18|20|22|24)
+			if [ "${prev}" = "--swift-disable-encryption" ] || [ "${prev}" = "--disable-notifications" ] || [ "${prev}" = "--enable-monitoring-graphs" ]; then
+				COMPREPLY=( $(compgen -W "yes no" -- ${cur}) )
+			fi
+			return 0
+		;;
+		*)
+			return 0
+		;;
+		esac
+	;;
+	cluster-show-machines|cluster-show-networks|cluster-show-ips|cluster-delete|cluster-show)
+		local cluster_list=$(ocicli -csv cluster-list | grep -v "id,name,domain" | cut -d, -f2 | tr \\n " ")
+		COMPREPLY=( $(compgen -W "${cluster_list}" -- ${cur}) )
+		return 0
+	;;
+	network-remove)
+		local network_list=$(ocicli -csv network-list | q -d, -H "SELECT name FROM - WHERE cluster NOT LIKE 'null'" | cut -d, -f1 | tr \\n " ")
+		COMPREPLY=( $(compgen -W "${network_list}" -- ${cur}) )
+		return 0
+	;;
+	network-add)
+		case ${COMP_CWORD} in
+		2)
+			local serial_list=$(ocicli -csv network-list | q -d, -H "SELECT name FROM - WHERE cluster='null'" | tr \\n " ")
+			COMPREPLY=( $(compgen -W "${serial_list}" -- ${cur}) )
+			return 0
+		;;
+		3)
+			local cluster_list=$(ocicli -csv cluster-list | grep -v "id,name,domain" | cut -d, -f2 | tr \\n " ")
+			COMPREPLY=( $(compgen -W "${cluster_list}" -- ${cur}) )
+			return 0
+		;;
+		4)
+			local role_list=$(ocicli -csv role-list | grep -v "id,name" | cut -d, -f2 | tr \\n " ")
+			COMPREPLY=( $(compgen -W "all vm-net ovs-bridge ${role_list}" -- ${cur}) )
+			return 0
+		;;
+		5|6)
+			COMPREPLY=( $(compgen -W "${iface_names}" -- ${cur}) )
+			return 0
+		;;
+		*)
+		;;
+		esac
+	;;
+	network-create)
+		case ${COMP_CWORD} in
+		4)
+			COMPREPLY=( $(compgen -W "0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32" -- ${cur}) )
+			return 0
+		;;
+		5)
+			local location_list=$(ocicli -csv location-list | grep -v "id,name,swiftregion" | cut -d, -f2 | tr \\n " ")
+			COMPREPLY=( $(compgen -W "${location_list}" -- ${cur}) )
+			return 0
+		;;
+		6)
+			local location_list=$(ocicli -csv location-list | grep -v "id,name,swiftregion" | cut -d, -f2 | tr \\n " ")
+			COMPREPLY=( $(compgen -W "yes no" -- ${cur}) )
+			return 0
+		;;
+		*)
+		;;
+		esac
+	;;
+	network-delete)
+		local network_list=$(ocicli -csv network-list | grep -v name,ip,cidr,is_public,cluster,role,iface1,iface2,location_id | cut -d, -f1 | tr \\n " ")
+		COMPREPLY=( $(compgen -W "${network_list}" -- ${cur}) )
+		return 0
+	;;
+	network-set)
+		case ${COMP_CWORD} in
+		2)
+			local network_list=$(ocicli -csv network-list | grep -v name,ip,cidr,is_public,cluster,role,iface1,iface2,location_id | cut -d, -f1 | tr \\n " ")
+			COMPREPLY=( $(compgen -W "${network_list}" -- ${cur}) )
+			return 0
+		;;
+		3|5|7|9|11|13|15|17|19|21)
+			COMPREPLY=( $(compgen -W "--role --iface1 --iface2 --ip --cidr --is-public --mtu --vlan --location --bridge-name" -- ${cur}) )
+			return 0
+		;;
+		4|6|8|10|12|14|16|18|20|22)
+			case "${prev}" in
+			"--role")
+				local role_list=$(ocicli -csv role-list | grep -v "id,name" | cut -d, -f2 | tr \\n " ")
+				COMPREPLY=( $(compgen -W "all vm-net ${role_list}" -- ${cur}) )
+				return 0
+			;;
+			"--iface1"|"--iface2")
+				COMPREPLY=( $(compgen -W "${iface_names}" -- ${cur}) )
+				return 0
+			;;
+			"--ip"|"--mtu"|"--vlan")
+				return 0
+			;;
+			"--cidr")
+				COMPREPLY=( $(compgen -W "0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32" -- ${cur}) )
+				return 0
+			;;
+			"--is-public")
+				COMPREPLY=( $(compgen -W "yes no" -- ${cur}) )
+				return 0
+			;;
+			"--location")
+				local location_list=$(ocicli -csv location-list | grep -v "id,name,swiftregion" | cut -d, -f2 | tr \\n " ")
+				COMPREPLY=( $(compgen -W "${location_list}" -- ${cur}) )
+				return 0
+			;;
+			*)
+				return 0
+			;;
+			esac
+		;;
+		*)
+		;;
+		esac
+	;;
+	role-delete)
+		local role_list=$(ocicli -csv role-list | grep -v "id,name" | cut -d, -f2 | tr \\n " ")
+		COMPREPLY=( $(compgen -W "${role_list}" -- ${cur}) )
+		return 0
+	;;
+	swift-region-delete)
+		local swiftregion_list=$(ocicli -csv swift-region-list | grep -v "id,name" | cut -d, -f2 | tr \\n " ")
+		COMPREPLY=( $(compgen -W "${swiftregion_list}" -- ${cur}) )
+		return 0
+	;;
+	location-create)
+		case ${COMP_CWORD} in
+		3)
+			local swiftregion_list=$(ocicli -csv swift-region-list | grep -v "id,name" | cut -d, -f2 | tr \\n " ")
+			COMPREPLY=( $(compgen -W "${swiftregion_list}" -- ${cur}) )
+			return 0
+		;;
+		*)
+			return 0
+		;;
+		esac
+	;;
+	location-delete)
+		local location_list=$(ocicli -csv location-list | grep -v "id,name,swiftregion" | cut -d, -f2 | tr \\n " ")
+		COMPREPLY=( $(compgen -W "${location_list}" -- ${cur}) )
+		return 0
+	;;
+	*)
+	;;
+	esac
+
+	COMPREPLY=($(compgen -W "${opts}" -- "${cur}"))
+}
+
+complete -F _ocicli ocicli

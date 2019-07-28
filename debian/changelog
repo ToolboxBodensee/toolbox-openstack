@@ -1,0 +1,311 @@
+openstack-cluster-installer (23) UNRELEASED; urgency=medium
+
+  * Install intel-microcode and smartmontools in nodes by default.
+  * Add full installation and support for Magnum.
+  * haproxy: correctly check SSL certificate of each service.
+  * SSL certificate with -addext "subjectAltName = DNS:${SLAVE_NODE_HOSTNAME}"
+    to avoid warnings.
+  * Add a debmirror machine type.
+  * Correctly generate the ec2 credential keys for Keystone.
+  * Switch Octavia to ACTIVE_STANDBY by default.
+  * Automatically format /dev/sdb as XFS over a volume group and mount it in
+    /var/lib/nova/instances.
+  * Automatically install megacli if requested in config file.
+  * Fix CephOSD nodes when using NVME disks.
+  * Allow using a Ceph cluster network and configure CephOSD nodes the correct
+    way for it.
+  * Always transmit an up-to-date /etc/hosts to all nodes throught the ENC.
+
+ -- Thomas Goirand <zigo@debian.org>  Wed, 15 May 2019 12:25:05 +0200
+
+openstack-cluster-installer (22) experimental; urgency=medium
+
+  [ Thomas Goirand ]
+  * Add role-add, role-create, role-delete API and ocicli.
+  * Add bash-completion script for ocicli.
+  * Enhance ocicli network-list, add a network-set command.
+  * Allow setting-up multiple external bridges for flat networks.
+  * List all bridge setup with OCI in neutron's config, allowing a virtually
+    unlimited number of bridges.
+  * Fix service_credentials/cafile in ceilometer.
+  * Add option to perform ipmitool settings in the target image when running on
+    the slave image.
+  * Add option to show the calculated IPMI console command.
+  * Add some sysctl customization (low swappiness, higher conntrack, etc.).
+  * Provision ssh public / private keypair between nova nodes in the
+    /var/lib/nova/.ssh folder, to allow (live) migration using ssh / scp.
+  * Switch to a db migration system with the schema saved in PHP format.
+  * Add a cluster-show command.
+  * Add the setup of chrony on all machines, with customization of time server
+    host for the clock source.
+  * Add the nf_conntrack module by default in /etc/modules.
+  * Make sure python-keystonemiddleware is installed on swift-proxy nodes.
+  * Firewall swift's container, account and object servers.
+  * Empty DEFAULT/external_network_bridge by default, as this prevent using
+    more than one external network.
+  * Libvirt configuration on compute nodes (ie: /etc/default/libvirt-guests):
+    - PARALLEL_SHUTDOWN=8
+    - SHUTDOWN_TIMEOUT=120
+    - START_DELAY=4
+  * Add qemu monitor on port 550XX for each VMs in the PoC.
+  * Copy swift_fstab_dev_list.sh when provisionning.
+  * Set Neutron's global_physnet_mtu and ml2's path_mtu if the VM net network
+    has mtu != 0, allowing to set (for example) mtu = 9000.
+  * Use wget to install openstack-backports-archive-keyring_0.1_all.deb instead
+    of using apt-get update / apt-get install --allow-unauthenticated (which
+    method doesn't work anymore in Buster).
+  * Set haproxy's nbproc to 4 by default for swiftproxy, compute and
+    controller nodes.
+  * Copy the backport repository key file inside the targets instead of using
+    the openstack-backports-archive-keyring package, which doesn't work anymore
+    if using Buster.
+  * Also install gnupg2 in the installed machines of the cluster.
+  * Add support for Stein's separated placement.
+  * Adapt puppet manifests so that they also work with Stein's puppet-openstack.
+  * Add the feature to setup any machine with software RAID.
+  * Using system serial number, and not chassis anymore.
+  * Fully working Octavia support.
+
+  [ Oliver Chaze ]
+  * swift: do not log in syslog general logs
+  * increase default haproxy server timeout
+
+ -- Thomas Goirand <zigo@debian.org>  Tue, 14 May 2019 17:18:44 +0200
+
+openstack-cluster-installer (21) unstable; urgency=medium
+
+  * Bugfix release for Buster which includes:
+    - Fixed reserve_ip_to_all_slaves_of_network() call in network_add API call.
+    - Correctly check for $mgmt_net["iface2"] and not $onenet when calculating
+      --static-iface.
+    - Fix block device list for swiftstore (statsd hostname was breaking it,
+    ordering was broken).
+    - Correctly set the erlang_cookie for rabbitmq as a random value.
+    - Correctly use a a real random key for heat's encryption key.
+    - Correct swift pipeline order when using encryption.
+    - Correctly set unix rights of drives in /srv/node.
+
+ -- Thomas Goirand <zigo@debian.org>  Tue, 05 Mar 2019 13:46:39 +0100
+
+openstack-cluster-installer (20) unstable; urgency=medium
+
+  * Set allow_resize_to_same_host to True on all nova nodes.
+  * Set dhcp_domain to '' in nova.conf, to avoid .novalocal or .openstacklocal
+    postfixed to hostname by DHCP.
+  * Set important rabbitmq production parameters (the most important one is the
+    autoheal, to avoid split-brain breakage).
+  * Randomize the rabbitmq host list in transport_url, to avoid having all
+    services connecting always to the same host.
+  * Add support for Cinder volume over Ceph.
+  * Provision Ceph OSD using bluestore.
+  * Fix poc-bin/oci-poc-setup-bodi-hook motd.
+  * Make Ceph optional on compute nodes:
+    - Add a machine-show to show machine properties.
+    - Add a machine-set, to select /var/lib/nova/instances on Ceph or not.
+    - Modify the ENC to transmit the use_ceph_if_available variable.
+    - Modify compute manifest to use the use_ceph_if_available and possibly use
+      Ceph or not for /var/lib/nova/instances.
+  * Better Octavia defaults.
+  * Fix dns_domain of neutron.conf to the domain name of the deployed cloud.
+  * Enable optional statsd logging for swiftstores.
+  * Using uwsgi instead of Apache for heat-api, heat-api-cfn, nova-api,
+    barbican-api and aodh-api.
+
+ -- Thomas Goirand <zigo@debian.org>  Wed, 20 Feb 2019 14:12:23 +0100
+
+openstack-cluster-installer (19) unstable; urgency=medium
+
+  * Set all services to use RabbitMQ HA queues.
+  * Explicitely choose the firewall type for Neutron agents.
+  * Setup ceilometer::agent::central on controller nodes.
+  * Setup cloudkitty-processor on multiple controllers using coordination URL.
+  * Fix Ceilometer redis connection URLs.
+  * Set resume_guests_state_on_host_boot in compute's nova.conf.
+  * Rewrite the Location: headers coming from nova & heat, so that microversion
+    redirections (ie: 302 redirect) can work. This repair listing instances in
+    Horizon.
+  * Correctly binds instance VNC servers to 0.0.0.0 on compute hosts.
+  * Make the NoVNC console work.
+  * Add rsync of glance images from first controller to the others.
+  * Add script to add machines in the ring.
+  * Fix Glance-api public_endpoint URL to correct HAProxy URL.
+
+ -- Thomas Goirand <zigo@debian.org>  Sat, 09 Feb 2019 19:12:00 +0100
+
+openstack-cluster-installer (18) unstable; urgency=medium
+
+  * Fix cloudkitty's keystone_fetcher and gnocchi_fetcher cafile=.
+  * Fix cloudkitty's rabbitmq amqp_sasl_mechanisms and login.
+  * Setup correct database/connection for Gnocchi.
+  * Setup redis for Gnocchi.
+  * Live image: iomem=relaxed console=tty0, install plymouth (so that systemd
+    prints on all consoles).
+  * Add Panko and Ceilometer services.
+  * New style of networking options for openstack-debian-images.
+  * Add e2fsprogs to the slaves.
+  * fernet_replace_keys => false by default, and also do not attempt to isntall
+    fernet key "1" on each puppet run.
+  * Nova default config on compute:
+    - DEFAULT/use_cow_images = False.
+    - preallocate_images = 'space'.
+    - remove_unused_original_minimum_age_seconds = 604800 (one week).
+  * Neutron default config:
+    - service_plugins: add segments.
+    - network_vlan_ranges = external (so, we use br-ex for the VLANs).
+  * Do not chown swift:swift /srv/node/X if X isn't mounted (which may be the
+    case if there's a borken drive in a swift cluster).
+  * Add firewalling of Octavia API on the VIP.
+  * Install default openstack-cluster-installer.conf for Buster.
+
+ -- Thomas Goirand <zigo@debian.org>  Thu, 24 Jan 2019 15:09:46 +0100
+
+openstack-cluster-installer (17) unstable; urgency=medium
+
+  * Use host CPU model for VMs in the -poc.
+  * Fix starting-up VMs with 3 drives in the PoC.
+  * Run gnocchi-api using uwsgi rather than Apache to avoid port bind conflict.
+  * Fix neutron.conf [database]/connection to be empty on compute nodes.
+  * Fix puppet scheduling of swiftproxy install.
+  * Fixed machines table with default SQL values.
+  * Do not use INSERT with '' as value for IDs, just omit it, so it works with
+    mariadb 10.3.
+  * Remove the nobarrier option from Ceph OSD fstab, as it doesn't work anymore
+    in Sid/Buster.
+  * Do not use roundrobin for glancebe in haproxy, but source, else it wouldn't
+    work properly.
+  * Add ccze to all installed computers.
+
+ -- Thomas Goirand <zigo@debian.org>  Tue, 22 Jan 2019 10:14:26 +0100
+
+openstack-cluster-installer (16) unstable; urgency=medium
+
+  * Add Gnocchi, Aodh, Cloudkitty and Octavia deployment.
+
+ -- Thomas Goirand <zigo@debian.org>  Fri, 14 Dec 2018 10:41:32 +0100
+
+openstack-cluster-installer (15) unstable; urgency=medium
+
+  * Add Compute, Volume and Ceph support.
+  * Correctly purges /etc/openstack-cluster-installer and /var/lib/oci.
+    (Closes: #915781).
+
+ -- Thomas Goirand <zigo@debian.org>  Tue, 20 Nov 2018 15:43:03 +0100
+
+openstack-cluster-installer (14) unstable; urgency=medium
+
+  * Add the possibility to customize the motd of installed machines.
+  * Switch Heat API URL from /orchestration to /orchestration-api to avoid any
+    clash with /orchestration-cfn.
+  * Fixed rabbitmq SSL setup, and made heat work.
+  * Add the setup of openstack-dashboard (aka: Horizon).
+  * Add the setup of Barbican.
+  * Add Swift encryption using a secret key stored in Barbican.
+  * Add puppet-module-puppetlabs-firewall, and firewall the public IP.
+
+ -- Thomas Goirand <zigo@debian.org>  Tue, 30 Oct 2018 14:12:02 +0100
+
+openstack-cluster-installer (13) unstable; urgency=medium
+
+  * Fix path of chown in swiftstore.pp.
+
+ -- Thomas Goirand <zigo@debian.org>  Tue, 30 Oct 2018 11:48:43 +0100
+
+openstack-cluster-installer (12) unstable; urgency=medium
+
+  * Use Exec in puppet to change unix right of /srv/node/* folders in all swift
+    store nodes, do not do that in rc.local anymore.
+
+ -- Thomas Goirand <zigo@debian.org>  Mon, 29 Oct 2018 16:26:22 +0100
+
+openstack-cluster-installer (11) unstable; urgency=medium
+
+  * Fixed $machine_ip for the listen of memcache in swiftproxy nodes, so that
+    it works with puppet 5.
+
+ -- Thomas Goirand <zigo@debian.org>  Mon, 29 Oct 2018 12:41:51 +0100
+
+openstack-cluster-installer (10) unstable; urgency=medium
+
+  * Do not install openstack-backports-archive-keyring when setting-up buildd
+    Debian repository.
+  * Overrides epmd.socket to make sure epmd binds on all interfaces.
+
+ -- Thomas Goirand <zigo@debian.org>  Thu, 25 Oct 2018 13:40:45 +0200
+
+openstack-cluster-installer (9) unstable; urgency=medium
+
+  * Automatically remove space in "connection = " in config file.
+  * Add option to include incoming buildd, so it's easier to test in Sid.
+
+ -- Thomas Goirand <zigo@debian.org>  Thu, 25 Oct 2018 12:14:23 +0200
+
+openstack-cluster-installer (8) unstable; urgency=medium
+
+  * Fixed Source URL in debian/copyright.
+  * Some more fixups for OCI to work with Sid/Buster without additional repo.
+
+ -- Thomas Goirand <zigo@debian.org>  Thu, 25 Oct 2018 10:51:50 +0200
+
+openstack-cluster-installer (7) unstable; urgency=medium
+
+  * Remove qemu-kvm from depends of openstack-cluster-installer, made the -poc
+    package to use only qemu, suggesting qemu-kvm. This should ease transition
+    to Testing.
+
+ -- Thomas Goirand <zigo@debian.org>  Tue, 23 Oct 2018 13:24:01 +0200
+
+openstack-cluster-installer (6) unstable; urgency=high
+
+  * Add authentication system.
+  * Switch to rocky when using backports.
+  * Add lots of middleware in the default Swift pipeline.
+  * Make it possible to expose the swift proxy-server directly without using
+    the controller's haproxy.
+  * Add read/write affinity.
+  * Lots of minor tweaks and debugs.
+
+ -- Thomas Goirand <zigo@debian.org>  Tue, 23 Oct 2018 11:06:35 +0200
+
+openstack-cluster-installer (5) unstable; urgency=medium
+
+  [ Ondřej Nový ]
+  * Running wrap-and-sort -bast
+  * Delete /var/lib/openstack-cluster-installer-poc on purge (Closes: #905516).
+
+  [ Thomas Goirand ]
+  * Add swift deployment capability.
+  * Add a CLI API client.
+
+ -- Thomas Goirand <zigo@debian.org>  Thu, 20 Sep 2018 11:09:09 +0200
+
+openstack-cluster-installer (4) unstable; urgency=medium
+
+  * Add a glance cluster.
+
+ -- Thomas Goirand <zigo@debian.org>  Fri, 17 Aug 2018 11:50:52 +0200
+
+openstack-cluster-installer (3) unstable; urgency=medium
+
+  [ Thomas Goirand ]
+  * Setup a Keystone cluster with Haproxy and a VIP.
+
+  [ Ondřej Nový ]
+  * Running wrap-and-sort -bast
+  * d/control: Use team+openstack@tracker.debian.org as maintainer
+
+ -- Thomas Goirand <zigo@debian.org>  Wed, 15 Aug 2018 16:24:41 +0200
+
+openstack-cluster-installer (2) unstable; urgency=medium
+
+  * Add openstack-cluster-installer-poc and puppet packages.
+  * Add full network/ip manager.
+  * Add automatic slave node cert management.
+  * Automatically setup a galera cluster on slave controller nodes.
+
+ -- Thomas Goirand <zigo@debian.org>  Thu, 21 Jun 2018 11:47:31 +0200
+
+openstack-cluster-installer (1) unstable; urgency=medium
+
+  * Initial release.
+
+ -- Thomas Goirand <zigo@debian.org>  Wed, 21 Mar 2018 14:17:07 +0100

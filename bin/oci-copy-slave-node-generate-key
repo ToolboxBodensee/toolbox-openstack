@@ -1,0 +1,42 @@
+#!/bin/sh
+
+set -e
+set -x
+
+SLAVE_NODE_HOSTNAME=${1}
+TMP_FOLDER=${2}
+
+if [ -z "${SLAVE_NODE_HOSTNAME}" ] ; then
+	echo "This script needs one hostname as parameter."
+	exit 1
+fi
+
+if [ -z "${TMP_FOLDER}" ] ; then
+	echo "This script needs a temp folder as parameter."
+	exit 1
+fi
+
+for i in $(echo ${SLAVE_NODE_HOSTNAME} | sed -e 's/[.]/ /g') ; do
+	if echo ${i} | grep -E -q "^(xn--)?[a-z0-9][a-z0-9-]{0,61}[a-z0-9]{0,1}\$" ; then
+		echo ""
+	else
+		echo "Not validated"
+		exit 1
+	fi
+done
+
+if echo ${TMP_FOLDER} | grep -q '^/var/lib/oci/clusters/[a-z0-9-]*/'${SLAVE_NODE_HOSTNAME}'$' ; then
+        echo ""
+else
+        echo "Not validated"
+        exit 1
+fi
+
+mkdir -p ${TMP_FOLDER}
+chown www-data:www-data /var/lib/oci
+chown -R www-data:www-data /var/lib/oci/clusters
+cp /var/lib/puppet/ssl/private_keys/${SLAVE_NODE_HOSTNAME}.pem ${TMP_FOLDER}/puppet-private-key.pem
+cp /var/lib/puppet/ssl/public_keys/${SLAVE_NODE_HOSTNAME}.pem ${TMP_FOLDER}/puppet-public-key.pem
+cp /var/lib/puppet/ssl/certs/ca.pem ${TMP_FOLDER}/puppet-ca.pem
+cp /var/lib/puppet/ssl/certs/${SLAVE_NODE_HOSTNAME}.pem ${TMP_FOLDER}/puppet-signed-cert.pem
+chown -R www-data:www-data ${TMP_FOLDER}

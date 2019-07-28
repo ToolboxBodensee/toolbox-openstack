@@ -1,0 +1,21 @@
+#!/bin/sh
+
+set -e
+
+#PKGOS-INCLUDE#
+
+if [ "$1" = "purge" ] ; then
+	if [ -f /usr/share/debconf/confmodule ] ; then
+		pkgos_dbc_postrm openstack-cluster-installer openstack-cluster-installer $@
+	fi
+
+	rm -rf /etc/openstack-cluster-installer/hiera
+	rm -rf /var/lib/oci
+
+	rm -f /etc/openstack-cluster-installer/openstack-cluster-installer.conf
+	rmdir --ignore-fail-on-non-empty /etc/openstack-cluster-installer || true
+fi
+
+#DEBHELPER#
+
+exit 0

@@ -1,0 +1,37 @@
+#!/bin/sh
+
+set -e
+set -x
+
+# Make sure we have a nova user and group
+if ! getent group nova > /dev/null 2>&1 ; then
+	addgroup --quiet --system nova --gid 64060
+fi
+if ! getent passwd nova > /dev/null 2>&1 ; then
+	adduser --system \
+		--home /var/lib/nova \
+		--no-create-home \
+		--quiet \
+		--disabled-password \
+		--shell /bin/sh \
+		--group nova --uid 64060
+fi
+
+# Make sure /var/lib/nova exists
+if [ ! -d /var/lib/nova ] ; then
+	mkdir -p /var/lib/nova
+	chown nova:nova /var/lib/nova
+fi
+
+# Make sure /var/lib/nova/.ssh exists
+if [ ! -d /var/lib/nova/.ssh ] ; then
+	mkdir -p /var/lib/nova/.ssh
+	chown nova:nova /var/lib/nova/.ssh
+	chmod 700 /var/lib/nova/.ssh
+fi
+
+if [ ! -f /var/lib/nova/.ssh/config ] ; then
+	echo "StrictHostKeyChecking no
+HashKnownHosts no" >/var/lib/nova/.ssh/config
+	chown nova:nova /var/lib/nova/.ssh/config
+fi
