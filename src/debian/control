@@ -1,0 +1,148 @@
+Source: openstack-cluster-installer
+Section: net
+Priority: optional
+Maintainer: Debian OpenStack <team+openstack@tracker.debian.org>
+Uploaders:
+ Thomas Goirand <zigo@debian.org>,
+Build-Depends:
+ debhelper (>= 10),
+ openstack-pkg-tools (>= 81~),
+Standards-Version: 4.1.4
+Homepage: https://salsa.debian.org/openstack-team/debian/openstack-cluster-installer
+Vcs-Browser: https://salsa.debian.org/openstack-team/debian/openstack-cluster-installer
+Vcs-Git: https://salsa.debian.org/openstack-team/debian/openstack-cluster-installer.git
+
+Package: openstack-cluster-installer
+Architecture: all
+Depends:
+ adduser,
+ apache2,
+ apache2-utils,
+ approx,
+ bind9,
+ bind9-host,
+ bind9utils,
+ bridge-utils,
+ ceph-common,
+ curl,
+ dbconfig-common,
+ default-mysql-server,
+ ipcalc,
+ ipmitool,
+ isc-dhcp-server,
+ jq,
+ live-build,
+ lsb-base,
+ net-tools,
+ openstack-debian-images,
+ openstack-pkg-tools,
+ openstack-puppet-modules,
+ php,
+ php-cli,
+ php-mysql,
+ php-radius,
+ php-ssh2,
+ puppet-master,
+ puppet-module-heini-wait-for,
+ puppet-module-icann-quagga,
+ puppet-module-oci (= ${binary:Version}),
+ puppet-module-puppetlabs-firewall,
+ pxelinux,
+ qemu-utils,
+ sudo,
+ swift,
+ tftpd-hpa,
+ ${misc:Depends},
+Description: automatic PXE and puppet-master installer for OpenStack
+ OCI (OpenStack Cluster Installer) is a software to provision an OpenStack
+ cluster automatically. This package install a provisioning machine, which
+ consists of a DHCP server, a PXE boot server, and a puppet-master.
+ .
+ Once computers in the cluster boot for the first time, a Debian live system
+ is served by OCI, to act as a discovery image. This live system then reports
+ the hardware features back to OCI. The computers can then be installed with
+ Debian from that live system, configured with a puppet-agent that will connect
+ to the puppet-master of OCI. OpenStack is then provisionned in these machines.
+ .
+ All of this is managed through a web interface or through the CLI.
+ .
+ This package contains the web interface and OS provisionning logic.
+
+Package: openstack-cluster-installer-cli
+Architecture: all
+Depends:
+ curl,
+ q-text-as-data,
+ ${misc:Depends},
+Description: automatic PXE and puppet-master installer for OpenStack - API client
+ OCI (OpenStack Cluster Installer) is a software to provision an OpenStack
+ cluster automatically. This package install a provisioning machine, which
+ consists of a DHCP server, a PXE boot server, and a puppet-master.
+ .
+ Once computers in the cluster boot for the first time, a Debian live system
+ is served by OCI, to act as a discovery image. This live system then reports
+ the hardware features back to OCI. The computers can then be installed with
+ Debian from that live system, configured with a puppet-agent that will connect
+ to the puppet-master of OCI. OpenStack is then provisionned in these machines.
+ .
+ All of this is managed through a web interface or through the CLI.
+ .
+ This package contains the command line interface (CLI) API client.
+
+Package: openstack-cluster-installer-poc
+Architecture: all
+Depends:
+ bridge-utils,
+ curl,
+ ipcalc,
+ jq,
+ lsb-base,
+ net-tools,
+ openipmi (>= 2.0.25),
+ openstack-debian-images,
+ openstack-pkg-tools,
+ qemu,
+ qemu-utils,
+ ${misc:Depends},
+Suggests:
+ qemu-kvm,
+Description: automatic PXE and puppet-master installer for OpenStack - PoC
+ OCI (OpenStack Cluster Installer) is a software to provision an OpenStack
+ cluster automatically. This package install a provisioning machine, which
+ consists of a DHCP server, a PXE boot server, and a puppet-master.
+ .
+ Once computers in the cluster boot for the first time, a Debian live system
+ is served by OCI, to act as a discovery image. This live system then reports
+ the hardware features back to OCI. The computers can then be installed with
+ Debian from that live system, configured with a puppet-agent that will connect
+ to the puppet-master of OCI. OpenStack is then provisionned in these machines.
+ .
+ All of this is managed through a web interface or through the CLI.
+ .
+ This package installs a PoC (Proof of Concept) server running VMs to test,
+ contribute and debug OCI. Note that you need at least 80 GB of RAM to run it,
+ as it will provision 8 nodes, with 2 nodes for each role: controller, computes,
+ volume and network, plus the OCI node.
+
+Package: puppet-module-oci
+Architecture: all
+Depends:
+ openstack-puppet-modules,
+ puppet-module-aboe-chrony,
+ puppet-module-deric-zookeeper,
+ puppet-module-magnum,
+ puppet-module-placement,
+ puppet-module-puppetlabs-mysql (>= 8.1.0),
+ ${misc:Depends},
+Description: automatic PXE and puppet-master installer for OpenStack - puppet module
+ OCI (OpenStack Cluster Installer) is a software to provision an OpenStack
+ cluster automatically. This package install a provisioning machine, which
+ consists of a DHCP server, a PXE boot server, and a puppet-master.
+ .
+ Once computers in the cluster boot for the first time, a Debian live system
+ is served by OCI, to act as a discovery image. This live system then reports
+ the hardware features back to OCI. The computers can then be installed with
+ Debian from that live system, configured with a puppet-agent that will connect
+ to the puppet-master of OCI. OpenStack is then provisionned in these machines.
+ .
+ This package contains the puppet module.

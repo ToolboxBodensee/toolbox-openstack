@@ -1,0 +1,22 @@
+Take a big care, the PHP web interface is to be considered *NOT* secured.
+Even if it does checks for user input correctness using regular expressions
+for all fields, it is advised to grant access to it only to trusted parties.
+Also, it is strongly advised to firewall access to OCI, so that only the
+management networks have access to it. It is not a good idea to expose
+OCI to the public internet.
+
+Also, the default setup only provides an Apache "Alias" directive. Nothing
+is automated to push an SSL configuration in Apache. Therefore, it is also
+strongly adivsed to do something like this to activate SSL in your server:
+
+# apt-get install ssl-cert
+# a2enmod ssl
+# a2ensite default-ssl.conf
+# systemctl reload apache2
+
+and then replace /etc/ssl/certs/ssl-cert-snakeoil.pem with a real SSL
+certificate.
+
+You've been warned...
+
+ -- Thomas Goirand <zigo@debian.org>  Thu, 18 Oct 2018 11:06:40 +0200

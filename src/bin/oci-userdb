@@ -1,0 +1,34 @@
+#!/bin/sh
+
+set -e
+
+CMD="mysql -D oci -e"
+
+usage (){
+	echo $(basename $0)" usages:"
+	echo "                      -l -> list users"
+	echo "           -d <username> -> remove a user"
+	echo "           -r <username> -> add a user with radius authentication"
+	echo "-a <username> [password] -> add a user with local db authentication"
+}
+
+if [ $# = 0 ] ; then
+	usage
+fi
+
+if [ "${1}" = "-l" ] ; then
+	${CMD} "SELECT * FROM users"
+fi
+
+if [ "${1}" = "-a" ] ; then
+	HASHED_PASS=$(php -r "echo password_hash('${3}', PASSWORD_BCRYPT);")
+	${CMD} "INSERT INTO users (login,hashed_password,use_radius) VALUES ('${2}','${HASHED_PASS}','no')"
+fi
+
+if [ "${1}" = "-r" ] ; then
+	${CMD} "INSERT INTO users (login,use_radius) VALUES ('${2}','yes')"
+fi
+
+if [ "${1}" = "-d" ] ; then
+	${CMD} "DELETE FROM users WHERE login='${2}' LIMIT 1"
+fi

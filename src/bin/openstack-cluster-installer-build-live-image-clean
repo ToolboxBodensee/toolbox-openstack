@@ -1,0 +1,7 @@
+#!/bin/sh
+
+set -e
+
+# Clean all
+
+rm -rf auto config local .build chroot cache chroot.files chroot.packages.install chroot.packages.live live-image-amd64.files live-image-amd64.packages binary tftpboot

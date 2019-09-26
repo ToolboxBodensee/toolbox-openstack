@@ -1,0 +1,42 @@
+#!/bin/sh
+
+set -e
+#set -x
+
+HOSTNAME=$1
+if ! host ${HOSTNAME} >/dev/null 2>&1 ; then
+	echo "Could not resolve ${HOSTNAME}"
+	exit 1
+fi
+
+IP=$(host ${HOSTNAME} | awk '{print $4}')
+IP_1=$(echo ${IP} | cut -d. -f1)
+IP_2=$(echo ${IP} | cut -d. -f2)
+IP_3=$(echo ${IP} | cut -d. -f3)
+IP_4=$(echo ${IP} | cut -d. -f4)
+
+HOST_Z=Z_${IP_1}_${IP_2}_${IP_3}
+VAL=$(cat /etc/openstack-cluster-installer/swift-ring.conf | grep ${HOST_Z} | cut -d= -f2)
+HOST_REGION=$(echo ${VAL} | cut -d, -f1 | sed -e s/r//)
+HOST_ZONE=$(echo ${VAL} | cut -d, -f2 | sed -e s/z//)
+HOST_WEIGHT=$(echo ${VAL} | cut -d, -f3 | sed -e s/w//)
+
+if [ -z ${HOST_REGION} ] || [ -z ${HOST_ZONE} ] ; then
+	echo "Could not find region or zone for host ${HOSTNAME}"
+	exit 1
+fi
+
+echo "===> Getting hdd information for ${HOSTNAME}"
+TMP_HDD_LIST=$(mktemp)
+ssh ${HOSTNAME} "cd /srv/node ; ls" >${TMP_HDD_LIST}
+
+echo "===> Adding disks into the ring"
+OBJECT_PORT=0
+for i in $(cat ${TMP_HDD_LIST}) ; do
+	echo "swift-ring-builder account.builder add r${HOST_REGION}z${HOST_ZONE}-${IP}:6002/${i} ${HOST_WEIGHT}"
+	echo "swift-ring-builder container.builder add r${HOST_REGION}z${HOST_ZONE}-${IP}:6001/${i} ${HOST_WEIGHT}"
+	OBJECT_CUR_PORT=$((6200 + ${OBJECT_PORT}))
+	echo "swift-ring-builder object.builder add r${HOST_REGION}z${HOST_ZONE}-${IP}:${OBJECT_CUR_PORT}/${i} ${HOST_WEIGHT}"
+	OBJECT_PORT=$((${OBJECT_PORT} + 1))
+done
+rm ${TMP_HDD_LIST}

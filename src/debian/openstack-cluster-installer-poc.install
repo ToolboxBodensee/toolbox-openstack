@@ -1,0 +1,2 @@
+poc-bin/*		/usr/bin
+poc-etc/oci-poc/*	/etc/oci-poc

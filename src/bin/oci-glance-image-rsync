@@ -1,0 +1,15 @@
+#!/bin/sh
+
+set -e
+
+ME=$(hostname)
+HOSTLIST=$(cat /etc/hosts | grep controller | awk '{print $2}')
+
+RANDOM_TIME=$(($(dd if=/dev/urandom bs=512 count=1 2>&1 | cksum | cut -d' ' -f1) % 300))
+sleep ${RANDOM_TIME}
+
+for i in ${HOSTLIST} ; do
+	if ! [ "${i}" = "${ME}" ] ; then
+		rsync -e 'ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no' -avz --delete /var/lib/glance/images/ root@${i}:/var/lib/glance/images/ >/dev/null 2>&1
+	fi
+done

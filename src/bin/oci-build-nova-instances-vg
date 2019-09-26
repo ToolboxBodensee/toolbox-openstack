@@ -1,0 +1,119 @@
+#!/bin/sh
+
+set -e
+set -x
+
+usage () {
+	echo "Usage: $0 /dev/<DEVICE>"
+	echo "Example: $0 /dev/sdb"
+	exit 1
+}
+
+if [ -z "${1}" ] ; then
+	usage
+fi
+
+VG_DEVICE_NAME=${1}
+
+if ! [ -e ${VG_DEVICE_NAME} ] ; then
+	echo "Device ${VG_DEVICE_NAME} does not exist"
+	exit 1
+fi
+
+# This is the "9" in cloud1-compute-9 ...
+COMP_NN=$(hostname | cut -d. -f1 | cut -d- -f3)
+# This is the "cloud1" in cloud1-compute-9 ...
+CLUST=$(hostname | cut -d. -f1 | cut -d- -f1)
+
+VG_NAME=${CLUST}comp${COMP_NN}vg0
+
+
+# Make the PV if it's possible
+if pvcreate -t ${VG_DEVICE_NAME} ; then
+	pvcreate ${VG_DEVICE_NAME}
+fi
+# Make VG
+if ! [ -d /dev/${VG_NAME} ] ; then
+	vgcreate ${VG_NAME} ${VG_DEVICE_NAME}
+	vgchange -a y ${VG_NAME}
+fi
+# Make LV
+if ! [ -h /dev/mapper/${VG_NAME}-nova ] ; then
+	FREE_SPACE=$(vgs --units m -o vg_free | tail -n 1 | awk '{print $1}' | cut -d. -f1)
+	lvcreate -L${FREE_SPACE}M -n nova ${VG_NAME}
+fi
+
+# Make the partition
+if ! blkid | grep -q ${VG_NAME}-nova ; then
+	mkfs.xfs /dev/${CLUST}comp${COMP_NN}vg0/nova
+fi
+
+# Insert partition in /etc/fstab
+eval $(blkid | grep ${VG_NAME}-nova | awk '{print $2}')
+if [ -z "${UUID}" ] ; then
+	echo "Could not find the partition UUID"
+	exit 1
+fi
+if ! grep -q ${UUID} /etc/fstab ; then
+	echo "UUID=${UUID}\t/var/lib/nova/instances\txfs\trw,relatime,attr2,inode64,noquota\t0\t2" >>/etc/fstab
+fi
+
+# Make sure we have a nova user and group
+if ! getent group nova > /dev/null 2>&1 ; then
+	addgroup --quiet --system nova --gid 64060
+fi
+if ! getent passwd nova > /dev/null 2>&1 ; then
+	adduser --system \
+		--home /var/lib/nova \
+		--no-create-home \
+		--quiet \
+		--disabled-password \
+		--shell /bin/sh \
+		--group nova --uid 64060
+fi
+
+# Make sure /var/lib/nova/instances exists
+if [ ! -d /var/lib/nova ] ; then
+	mkdir -p /var/lib/nova
+	chown nova:nova /var/lib/nova
+fi
+
+
+# Mount the partition if it's needed (ie: not mounted yet)
+if ! cat /proc/mounts | grep instances ; then
+	if systemctl -q is-enabled nova-compute.service ; then
+		NOVA_COMPUTE_ENABLED=yes
+	else
+		NOVA_COMPUTE_ENABLED=no
+	fi
+	if [ -d /var/lib/nova/instances ] ; then
+		OLD_FOLDER_MIGRATION=yes
+	else
+		OLD_FOLDER_MIGRATION=no
+	fi
+
+	if [ "${NOVA_COMPUTE_ENABLED}" = "yes" ] ; then
+		systemctl stop nova-compute.service
+	fi
+
+	if [ "${OLD_FOLDER_MIGRATION}" = "yes" ] ; then
+		mv /var/lib/nova/instances/ /var/lib/nova/instances-old
+	fi
+
+	if ! [ -d /var/lib/nova/instances ] ; then
+		mkdir -p /var/lib/nova/instances
+	fi
+	mount /var/lib/nova/instances
+	chown nova:nova /var/lib/nova/instances
+
+	if [ "${OLD_FOLDER_MIGRATION}" = "yes" ] ; then
+		if ls /var/lib/nova/instances-old/* >/dev/null 2>&1; then
+			mv /var/lib/nova/instances-old/* /var/lib/nova/instances
+		fi
+		rm -rf /var/lib/nova/instances-old
+	fi
+
+	if [ "${NOVA_COMPUTE_ENABLED}" = "yes" ] ; then
+		systemctl start nova-compute.service
+	fi
+fi

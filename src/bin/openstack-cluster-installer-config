@@ -1,0 +1,141 @@
+#!/bin/sh
+
+set -e
+set -x
+
+if ! [ -r /etc/openstack-cluster-installer/openstack-cluster-installer.conf ] ; then
+	echo "Could not load /etc/openstack-cluster-installer/openstack-cluster-installer.conf"
+	exit 1
+fi
+
+TMPFILE=$(mktemp -t openstack-cluster-installer.XXXXXX)
+cat /etc/openstack-cluster-installer/openstack-cluster-installer.conf | grep -v '^\[' >${TMPFILE}
+. ${TMPFILE}
+rm ${TMPFILE}
+
+for i in $@ ; do
+	case "${1}" in
+	"--pxe-server-ip")
+		if [ -z "${2}" ] ; then echo "Parameter for option --pxe-server-ip is missing" > /dev/stderr ; DO_EXIT="yes" ; fi
+		OTCI_PXE_SERVER_IP=${2}
+		shift
+		shift
+		;;
+	"--configure-dummy-nick")
+		OTCI_CONFIGURE_DUMMY_NICK=yes
+		shift
+		;;
+	"--undo-dummy-nick-setup")
+		OTCI_UNCONFIGURE_DUMMY_NICK=yes
+		;;
+	*)
+		;;
+	esac
+done
+
+if [ "${OTCI_UNCONFIGURE_DUMMY_NICK}" = "yes" ] ; then
+	brctl delif ${PXE_BRIDGE_NAME} ${PXE_NIC_NAME} || true
+	brctl delif ${PXE_BRIDGE_NAME} ${PXE_VM_VIRTAP_NAME} || true
+	brctl delbr ${PXE_BRIDGE_NAME} || true
+	ip link delete ${PXE_VM_VIRTAP_NAME} || true
+	rmmod dummy
+	exit 0
+fi
+
+if [ -z "${OTCI_PXE_SERVER_IP}" ] ; then
+	OTCI_PXE_SERVER_IP=$(ipcalc ${OPENSTACK_CLUSTER_NETWORK} | grep HostMin | awk '{print $2}')
+	echo "No --pxe-server-ip given, using ${OTCI_PXE_SERVER_IP} as default." > /dev/stderr
+fi
+
+otci_enable_nested_virt () {
+	if [ -e /sys/module/kvm_intel/parameters/nested ] ; then
+		NESTED_FLAG=$(cat /sys/module/kvm_intel/parameters/nested)
+		if [ "${NESTED_FLAG}" = "N" ] ; then
+			rmmod kvm-intel || true
+			sh -c "echo 'options kvm-intel nested=y' >> /etc/modprobe.d/dist.conf"
+			modprobe kvm-intel || true
+		fi
+	fi
+}
+
+otci_calc_network_config () {
+	OTCI_PXE_NETWORK=$(ipcalc ${OTCI_PXE_SERVER_IP}/24 | grep Network | awk '{print $2}' | cut -d/ -f1)
+	OTCI_PXE_NETMASK=$(ipcalc ${OTCI_PXE_SERVER_IP}/24 | grep Netmask | awk '{print $2}')
+	OTCI_PXE_DIGIT1=$(echo ${OTCI_PXE_SERVER_IP} | cut -d. -f1)
+	OTCI_PXE_DIGIT2=$(echo ${OTCI_PXE_SERVER_IP} | cut -d. -f2)
+	OTCI_PXE_DIGIT3=$(echo ${OTCI_PXE_SERVER_IP} | cut -d. -f3)
+	OTCI_PXE_DIGIT4=$(echo ${OTCI_PXE_SERVER_IP} | cut -d. -f4)
+	OTCI_PXE_LIVE_IP=${OTCI_PXE_DIGIT1}.${OTCI_PXE_DIGIT2}.${OTCI_PXE_DIGIT3}.$((${OTCI_PXE_DIGIT4} + 1))
+}
+
+otci_setup_dummy_nic () {
+	# Create a dummy virtual interface
+	modprobe dummy
+	ip link set name ${PXE_NIC_NAME} dev dummy0
+	ifconfig ${PXE_NIC_NAME} hw ether 00:22:22:ff:ff:ff
+
+	# Create a bridge and bridge that interface to it
+	ip tuntap add dev ${PXE_VM_VIRTAP_NAME} mode tap user ${PXE_VM_NIC_USER}
+	brctl addbr ${PXE_BRIDGE_NAME}
+	brctl addif ${PXE_BRIDGE_NAME} ${PXE_NIC_NAME}
+	brctl addif ${PXE_BRIDGE_NAME} ${PXE_VM_VIRTAP_NAME}
+	ifconfig ${PXE_BRIDGE_NAME} ${OTCI_PXE_SERVER_IP} netmask ${OTCI_PXE_NETMASK} up
+	ip link set ${PXE_BRIDGE_NAME} up
+	ip link set ${PXE_NIC_NAME} up
+	ip link set ${PXE_VM_VIRTAP_NAME} up
+}
+
+otci_setup_tftp_server () {
+	sed -i 's/[ \t]*TFTP_ADDRESS[ \t]*=.*/TFTP_ADDRESS="'${OTCI_PXE_SERVER_IP}':69"/' /etc/default/tftpd-hpa
+	sed -i 's|[ \t]*TFTP_DIRECTORY[ \t]*=.*|TFTP_DIRECTORY="/var/lib/openstack-cluster-installer/tftp"|' /etc/default/tftpd-hpa
+}
+
+otci_setup_isc_dhcpd () {
+	echo "
+option domain-name \"debian.net\";
+option domain-name-servers 8.8.8.8;
+default-lease-time 600;
+max-lease-time 7200;
+ddns-update-style none;
+authoritative;
+ignore-client-uids On;
+
+subnet ${OTCI_PXE_NETWORK} netmask ${OTCI_PXE_NETMASK} {
+  range ${OTCI_PXE_LIVE_IP} ${OTCI_PXE_LIVE_IP};
+  option routers ${OTCI_PXE_SERVER_IP};
+  next-server ${OTCI_PXE_SERVER_IP};
+  if exists user-class and option user-class = \"iPXE\" {
+    filename \"http://${OTCI_PXE_SERVER_IP}/openstack-cluster-installer/tftp/ipxe-boot-script\";
+  } else {
+    filename \"pxelinux.0\";
+  }
+}
+
+host discovery-image.debian.net { hardware ethernet ${QEMU_VM_MAC}; fixed-address ${OTCI_PXE_LIVE_IP}; }
+
+" >/etc/dhcp/dhcpd.conf
+	sed -i 's/[ \t#]*INTERFACESv4[ \t]*=.*/INTERFACESv4=\"${PXE_BRIDGE_NAME}\"/' /etc/default/isc-dhcp-server
+
+	mkdir -p /var/lib/openstack-cluster-installer/tftp
+	cp /usr/lib/PXELINUX/lpxelinux.0 /var/lib/openstack-cluster-installer/tftp
+
+echo "#!ipxe
+
+chain tftp://${OTCI_PXE_SERVER_IP}/lpxelinux.0
+" >/var/lib/openstack-cluster-installer/tftp/ipxe-boot-script
+}
+
+otci_setup_scratch_disk () {
+	qemu-img create /var/lib/openstack-cluster-installer/openstack-cluster-installer-scratch-disk.dat 4G
+}
+
+otci_enable_nested_virt
+otci_calc_network_config
+if [ "${OTCI_CONFIGURE_DUMMY_NICK}" = "yes" ] ; then
+	otci_setup_dummy_nic
+fi
+otci_setup_tftp_server
+otci_setup_isc_dhcpd
+otci_setup_scratch_disk
+service isc-dhcp-server restart
+service tftpd-hpa restart

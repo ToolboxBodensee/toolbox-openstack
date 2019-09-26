@@ -1,0 +1,12 @@
+#!/bin/sh
+
+set -e
+
+if [ "${1}" = "purge" ] ; then
+	rm -rf /var/lib/openstack-cluster-installer-poc/runtime
+	rm -rf /var/lib/openstack-cluster-installer-poc/templates
+fi
+
+#DEBHELPER#
+
+exit 0

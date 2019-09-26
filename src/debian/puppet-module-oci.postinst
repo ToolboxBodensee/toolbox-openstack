@@ -1,0 +1,11 @@
+#!/bin/sh
+
+set -e
+
+if [ "${1}" = "configure" ] ; then
+	update-alternatives --install /usr/share/puppet/modules/oci puppet-module-oci /usr/share/puppet/modules.available/oci 500
+fi
+
+#DEBHELPER#
+
+exit 0
