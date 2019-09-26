@@ -1,0 +1,19 @@
+# This file should only be used to set python package pins that are
+# not present in OpenStack's upper-constraints. Any pins present in
+# this file will override any requirements set in *requirements.txt,
+# upper-constraints and any roles/vars.
+#
+# Use this file with caution!
+#
+
+### Pinned for gnocchi's dependency pycradox
+# Update 2010.01.12 still valid: https://github.com/gnocchixyz/gnocchi/blob/master/setup.cfg#L78
+# https://github.com/sileht/pycradox/commit/2209f89fd65ecf31bea8eac6405acce2543e7b84
+Cython<0.28
+
+# For idempotency on ubuntu, argparse need to stay at 1.2.1
+# See also ChangeId: I8be207c359388d00b34448318bc17c8b0039c4db
+argparse==1.2.1;python_version=='2.7'
+pip==19.1
+setuptools==41.0.1
+wheel==0.33.1
