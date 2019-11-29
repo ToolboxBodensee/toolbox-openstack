@@ -1,5 +1,7 @@
 # What is OpenStack Cluster Installer (OCI)
 
+**Entwicklung nur auf [GitLab](https://gitlab.com/ToolboxBodensee/toolbox-infrastructure/toolbox-openstack). Auf GitHub befindet sich lediglich ein Mirror**
+
 ### General description
 
 OCI (OpenStack Cluster Installer) is a software to provision an OpenStack
